@@ -1,8 +1,3 @@
-(* installation:
-opam pin add -ny pvec https://github.com/dbuenzli/pvec.git
-opam install fmt pvec
-*)
-
 module type CRDT_element = sig
   type t
   val equal : t -> t -> bool

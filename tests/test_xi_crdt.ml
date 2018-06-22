@@ -4,6 +4,10 @@ module C = CharCRDT
 let m = C.Marker.of_int64
 
 let a_snapshot = Alcotest.testable C.Snapshot.pp C.Snapshot.equal
+let a_char_vec =
+  Alcotest.testable
+    (Pvec.pp ~sep:Fmt.(unit "|") C.Char.pp)
+    (Pvec.equal ~eq:Char.equal)
 
 let test_five_singletons () : unit =
   let a = C.singleton 1l (m 24L) 'c' in
@@ -15,9 +19,13 @@ let test_five_singletons () : unit =
   let snap_abcde = C.Snapshot.of_t abcde in
   let edcba = C.merge e d |> C.merge c |> C.merge b |> C.merge a in
   let snap_edcba = C.Snapshot.of_t edcba in
-  (* TODO verify correct order: c ; b ; a ; d ; e *)
+
   Alcotest.(check a_snapshot) "independent of merge order"
-    snap_abcde snap_edcba
+    snap_abcde snap_edcba ;
+
+  Alcotest.(check a_char_vec) "order is correct"
+    (Pvec.of_list ['c';'b';'a';'d';'e'])
+    (C.Snapshot.to_vector snap_edcba)
 
 let test_singleton_append () : unit =
   let a = C.singleton 3l (m 10L) 'a' in
@@ -32,9 +40,13 @@ let test_singleton_append () : unit =
     let t = C.merge a b |> C.merge c |> C.merge x in
     C.Snapshot.of_t t
   in
-  (* TODO verify correct order: c;b;x;a *)
+
   Alcotest.(check a_snapshot) "append is equivalent to merging with (author+1)"
-    snap_without_append snap_with_append
+    snap_without_append snap_with_append ;
+
+  Alcotest.(check a_char_vec) "order is correct"
+    (Pvec.of_list ['c';'b';'x';'a'])
+    (C.Snapshot.to_vector snap_with_append)
 
 
 let tests : unit Alcotest.test_case list = [
