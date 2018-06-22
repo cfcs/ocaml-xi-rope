@@ -9,7 +9,23 @@ let a_char_vec =
     (Pvec.pp ~sep:Fmt.(unit "|") C.Char.pp)
     (Pvec.equal ~eq:Char.equal)
 
-let test_five_singletons () : unit =
+let qc_singleton =
+  let open QCheck.Gen in
+  (int_bound (0x01ffFFFF) >|= Int32.of_int) >>= fun author ->
+  (int_bound (0x07ffFFFF) >|= Int64.of_int
+   >|= C.Marker.of_int64) >>= fun marker ->
+    (char >|= C.singleton author marker)
+
+let qc_singleton_list : C.t list QCheck.Gen.t =
+  QCheck.Gen.(list_size (int_bound 100) qc_singleton)
+
+let qc_singleton_permutations : (C.t list * C.t list) QCheck.Gen.t =
+  let open QCheck.Gen in
+  qc_singleton_list >>= fun list_a ->
+  shuffle_l list_a >|= fun list_b ->
+  (list_a, list_b)
+
+let test_singleton_merge () : unit =
   let a = C.singleton 1l (m 24L) 'c' in
   let b = C.singleton 2l (m 20L) 'b' in
   let c = C.singleton 3l (m 22L) 'a' in
@@ -26,6 +42,17 @@ let test_five_singletons () : unit =
   Alcotest.(check a_char_vec) "order is correct"
     (Pvec.of_list ['c';'b';'a';'d';'e'])
     (C.Snapshot.to_vector snap_edcba)
+
+let test_singleton_qc_merge () : unit =
+  QCheck.Test.check_exn @@ QCheck.Test.make ~count:1000
+    ~name:"quickcheck permutations of singleton merges"
+    (QCheck.make qc_singleton_permutations)
+    (fun (a,b) ->
+       let merge_and_snapshot lst =
+         List.fold_left C.merge C.empty lst |> C.Snapshot.of_t in
+       Alcotest.(check a_snapshot) "quickcheck permutations of singleton merges"
+         (merge_and_snapshot a) (merge_and_snapshot b); true
+    )
 
 let test_singleton_append () : unit =
   let a = C.singleton 3l (m 10L) 'a' in
@@ -48,8 +75,8 @@ let test_singleton_append () : unit =
     (Pvec.of_list ['c';'b';'x';'a'])
     (C.Snapshot.to_vector snap_with_append)
 
-
 let tests : unit Alcotest.test_case list = [
-  "singleton ordering", `Quick, test_five_singletons ;
+  "singleton merge", `Quick, test_singleton_merge ;
   "singleton append", `Quick, test_singleton_append ;
+  "singleton quickcheck merge", `Slow, test_singleton_qc_merge ;
 ]

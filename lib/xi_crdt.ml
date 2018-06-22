@@ -225,7 +225,9 @@ module CRDT(E: CRDT_element) = struct
           List.remove_assoc key
         in
         let rec handle_child (ignored,acc) marker : 'b list * 'a list=
-          let children, tl = take_key (snd marker) in
+          let children, _tl = take_key (snd marker) in
+          (* TODO tl should be used instead of edge_dag for lookups
+             from here on to limit the search space *)
           let children =
             List.filter (fun a -> not @@ List.mem a ignored) children in
           if children <> [] then
@@ -237,7 +239,9 @@ module CRDT(E: CRDT_element) = struct
              (ignored, marker::[]) children) |> fun (ignored, acc2) ->
           ignored, acc @ acc2
         in
-        handle_child ([],[]) (-1l,Marker.beginning) |> snd
+        if edge_dag = [] || edge_dag = [Marker.ending, []]
+        then [] (* dag is valid, but empty *)
+        else handle_child ([],[]) (-1l,Marker.beginning) |> snd
       in
       Fmt.pr "sorted_dag: @[%a@]@."
         Fmt.(list ~sep:(unit";") @@ pair (parens int32) Marker.pp) sorted_dag;

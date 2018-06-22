@@ -54,6 +54,9 @@ module CRDT(E: CRDT_element) :
 
     end
 
+    val empty : t
+    (** [empty] is a [t] without any elements, edges or edits. *)
+
     val singleton : author_id -> Marker.t -> E.t -> t
     (** [singleton author marker element] is a new {!t} consisting of a
         single element [element] denoted by [marker],
