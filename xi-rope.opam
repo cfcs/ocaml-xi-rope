@@ -24,6 +24,7 @@ depends: [
   "odoc" {doc}
 
   "fmt"
+  "logs"
   "pvec"
   "uchar" # for ocaml 4.02 compat
   "rresult"

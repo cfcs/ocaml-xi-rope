@@ -15,7 +15,7 @@ module CRDT(E: CRDT_element) :
     val pp : Format.formatter -> t -> unit
     (** [pp fmt t] is [t] pretty-printed on [fmt].*)
 
-    type author_id
+    type author_id = int32
     (** The type used to represent an author. Used for "tie" resolution.*)
 
     type elt = E.t
@@ -72,6 +72,13 @@ module CRDT(E: CRDT_element) :
       type snapshot = private (Marker.t * element) Pvec.t
 
       val pp : Format.formatter -> snapshot -> unit
+
+      val equal : snapshot -> snapshot -> bool
+      (** [equal a b] is [true] if [a] and [b] are equivalent,
+          that is, if they have identical length;
+          and each corresponding element is equivalent according to
+          {!Marker.equal} and {!E.equal}, and have the
+          same {!Alive}/{!Tombstone} status.*)
 
       val to_vector : snapshot -> E.t Pvec.t
 

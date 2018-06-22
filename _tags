@@ -1,7 +1,7 @@
 true: color(always), bin_annot, safe_string, principal
 true: warn(+A-4-18-41-42-44-48-58)
-true: package(fmt pvec rresult uchar)
+true: package(fmt logs.fmt pvec rresult uchar)
 
 "lib": include
 
-<test/*>: package(alcotest qcheck)
+<tests/*>: package(alcotest qcheck)

@@ -51,7 +51,7 @@ As such, this is not *production-ready:*
 
 ```
 opam pin add -ny pvec https://github.com/dbuenzli/pvec.git
-opam install alcotest fmt pvec qcheck rresult uchar
+opam install alcotest fmt logs pvec qcheck rresult uchar
 ```
 
 # Further reading

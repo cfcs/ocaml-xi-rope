@@ -1,7 +1,7 @@
 S lib
 B _build/lib
 
-PKG fmt pvec rresult uchar
+PKG fmt logs pvec rresult uchar
 
 PKG topkg
 

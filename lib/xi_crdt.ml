@@ -157,6 +157,14 @@ module CRDT(E: CRDT_element) = struct
   module Snapshot = struct
     type snapshot = (Marker.t * element) Pvec.t
 
+    let equal (a:snapshot) (b:snapshot) : bool =
+      Pvec.equal a b ~eq:(fun a b ->
+          Marker.equal (fst a) (fst b)
+          && ( match snd a, snd b with
+              | Live a, Live b -> E.equal a b
+              | Tombstone a, Tombstone b -> E.equal a b
+              | _ -> false ) )
+
     let pp : Format.formatter -> snapshot -> unit =
       Pvec.pp ~sep:Fmt.(unit " -> ")
         Fmt.(pair ~sep:(unit":") Marker.pp pp_element)
@@ -291,31 +299,3 @@ module CharCRDT = struct
   end
   include CRDT(Char)
 end
-
-module C = CharCRDT
-
-let test () =
-  let m = C.Marker.of_int64 in
-  let a = C.singleton 2l (m 10L) 'a' in
-  let b = C.singleton 1l (m 20L) 'b' in
-  let c = C.singleton 0l (m 30L) 'c' in
-  let x = C.append b ~author:1l ~after:(m 20L) (m 40L)'x' in
-  let abc = C.merge a b |> C.merge c |> C.merge x in
-  (* 0:c ; 1:b ; 1:x ; 2:a *)
-  Fmt.pr "ab: %a\n" C.pp abc ;
-  let snapshot = C.Snapshot.of_t abc in
-  Fmt.pr "snapshot: @[<v>%a@ @]\n"
-    Fmt.(C.Snapshot.pp) snapshot ;
-  (* c ; b ; a ; d ; e *)
-  let a = C.singleton 1l (m 24L) 'c' in
-  let b = C.singleton 2l (m 20L) 'b' in
-  let c = C.singleton 3l (m 22L) 'a' |> C.merge (C.singleton 5l (m 30L) 'e') in
-  let d = C.singleton 4l (m 23L) 'd' in
-  let abc = C.merge a b |> C.merge c |> C.merge d in
-  Fmt.pr "ab: %a\n" C.pp abc ;
-  let snapshot = C.Snapshot.of_t abc in
-  Fmt.pr "snapshot: @[<v>%a@ @]\n"
-    C.Snapshot.pp snapshot ;
-  ()
-
-let () = test ()
