@@ -1,0 +1,8 @@
+description = "Xi-rope CRDT"
+version = "%%VERSION_NUM%%"
+requires = "fmt pvec rresult uchar"
+archive(byte) = "xi-rope.cma"
+archive(native) = "xi-rope.cmxa"
+plugin(byte) = "xi-rope.cma"
+plugin(native) = "xi-rope.cmxs"
+exists_if = "xi-rope.cma"

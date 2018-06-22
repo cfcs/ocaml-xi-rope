@@ -1,0 +1,34 @@
+opam-version: "1.2"
+name:         "xi-rope"
+homepage:     "https://github.com/cfcs/ocaml-xi-rope"
+dev-repo:     "https://github.com/cfcs/ocaml-xi-rope.git"
+bug-reports:  "https://github.com/cfcs/ocaml-xi-rope/issues"
+doc:          "https://cfcs.github.io/ocaml-xi-rope/doc"
+author:       ["cfcs"]
+maintainer:   ["cfcs"]
+license:      "AGPL"
+
+build: [
+  ["ocaml" "pkg/pkg.ml" "build" "--pinned" "%{pinned}%"]
+]
+build-test: [
+  ["ocaml" "pkg/pkg.ml" "build" "--pinned" "%{pinned}%" "--tests" "true"]
+  ["ocaml" "pkg/pkg.ml" "test"]
+]
+
+depends: [
+  "ocamlfind" {build}
+  "ocamlbuild" {build}
+  "topkg" {build}
+
+  "odoc" {doc}
+
+  "fmt"
+  "pvec"
+  "uchar" # for ocaml 4.02 compat
+  "rresult"
+
+  "qcheck" {test}
+  "alcotest" {test}
+]
+available: [ ocaml-version >= "4.02.0" ]
