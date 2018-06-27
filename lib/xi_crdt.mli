@@ -2,8 +2,12 @@
 
 module type CRDT_element = sig
   type t
+  (** [t] is a (potentially) abstract type representing the element leaves
+      in the CRDT data structure.*)
   val equal : t -> t -> bool
+  (** [equal a b] is [true] if [a] and [b] are structurally equivalent.*)
   val pp : Format.formatter -> t -> unit
+  (** [pp fmt t] is [t] pretty-printed on [fmt].*)
 end
 
 module CRDT(E: CRDT_element) :
@@ -15,6 +19,10 @@ module CRDT(E: CRDT_element) :
     val pp : Format.formatter -> t -> unit
     (** [pp fmt t] is [t] pretty-printed on [fmt].*)
 
+    val equal : t -> t -> bool
+    (** [equal a b] is [true] if [a] and [b] containg exactly the same elements,
+        edges and edits.*)
+
     type author_id = int32
     (** The type used to represent an author. Used for "tie" resolution.*)
 
@@ -24,6 +32,14 @@ module CRDT(E: CRDT_element) :
     type element = private | Live of elt
                            | Tombstone of elt
     val pp_element : Format.formatter -> element -> unit
+    val element_equal : element -> element -> bool
+    (** [element_equal a b] is [{!E.equal} a b] if
+        [a] and [b] are both {!element.Live} or {!element.Tombstone};
+        otherwise [false].*)
+
+    val element_equal_ignoring_status : element -> element -> bool
+    (** [element_equal_ignoring_status a b] is [{!E.equal} a b], regardless of
+        the liveness of the two. See {!element_equal}.*)
 
     module Marker : sig
       type t (** A marker uniquely represents an element in the set *)
@@ -65,14 +81,15 @@ module CRDT(E: CRDT_element) :
     val merge : t -> t -> t
     (** [merge t1 t2] is the applied union of [t1] and [t2].*)
 
-    val append : t -> author:author_id -> after:Marker.t -> Marker.t -> E.t -> t
-    (** [append t author insertpoint new_marker new_element] is
+    val insert_element : t -> author:author_id -> after:Marker.t ->
+      Marker.t -> E.t -> t
+    (** [append_element t author insertpoint new_marker new_element] is
         [{!merge} t ({!singleton} author new_marker new_element)] with the
         singleton being inserted into [t] immediately after [insertpoint].
     *)
 
     module Snapshot : sig
-      type snapshot = private (Marker.t * element) Pvec.t
+      type snapshot = (Marker.t * element) Pvec.t (* TODO make private*)
 
       val pp : Format.formatter -> snapshot -> unit
 
@@ -81,14 +98,32 @@ module CRDT(E: CRDT_element) :
           that is, if they have identical length;
           and each corresponding element is equivalent according to
           {!Marker.equal} and {!E.equal}, and have the
-          same {!Alive}/{!Tombstone} status.*)
+          same {!element.Live}/{!element.Tombstone} status.*)
 
       val to_vector : snapshot -> E.t Pvec.t
+      (** [to_vector snap] is a {!Pvec.t} with [snap]'s {b live} elements.*)
+
+      val extend_with_vector : snapshot -> E.t Pvec.t -> snapshot
+      (** [extend_with_vector snap vector] is [snap] merged with [vector],
+          with [vector]'s elements all being marked as {!element.Live},
+          and with elements from [snap] that {b are not} present in [vector]
+          marked as {!element.Tombstone}'d.
+          Where possible, the markers from [snap] are reused to produce the
+          smallest valid delta; otherwise {!Marker.generate} is used to create
+          new markers, and the new elements appended {b to the right}.*)
 
       val of_t : t -> snapshot
       (** [of_t t] is the computed and ordered elements of the CRDT state [t]
           represented as a vector containing all live and tombstoned elements.*)
     end
+
+    val update_with_vector : author_id -> t -> E.t Pvec.t -> t
+    (** [update_with_vector author state vector] is [state] updated with
+        [vector], marking elements present in [vector] as {!element.Live}, and
+        elements only present in [state] as {!element.Tombstone}'d.
+        New elements are assigned to the [author] id.
+        See {!Snapshot.update_with_vector}, which is used internally.
+    *)
 
   end
 

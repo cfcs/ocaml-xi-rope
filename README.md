@@ -42,7 +42,8 @@ As such, this is not *production-ready:*
 - **insertion** is supported, but my algorithms, and the API, to handle
   insertions are fairly limited and cumbersome to work with.
 
-- The test suite is missing.
+- ~~The test suite is missing.~~
+  - The test suite is missing QuickCheck shrinkers
 
 - Nice things like Levien's line-wrapping and paging algorithms are
   **not** implemented.
@@ -60,5 +61,6 @@ Below is a list of resources I found helpful and interesting:
 - [overview of Xi's CRDT](https://google.github.io/xi-editor/docs/crdt.html)
   - [more details](https://google.github.io/xi-editor/docs/crdt-details.html)
   - [Xi documentation](http://google.github.io/xi-editor/docs.html)
-- [YouTube presentation on Xi](https://www.youtube.com/watch?v=SKtQgFBRUvQ)
+- [YouTube presentation on Xi (36min)](https://www.youtube.com/watch?v=SKtQgFBRUvQ)
+- [YouTube presentation on WOOT (25min)](https://www.youtube.com/watch?v=NSTZ4mIv_wk)
 - [Nathan Sobo's description of the merge operations](https://gist.github.com/nathansobo/a15266a30ed433052a915605596c5ff4)

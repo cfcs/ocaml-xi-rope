@@ -3,6 +3,8 @@ B _build/lib
 
 PKG fmt logs pvec rresult uchar
 
+PKG compiler-libs.toplevel
+
 PKG topkg
 
 PKG alcotest
