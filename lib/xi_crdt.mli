@@ -4,8 +4,10 @@ module type CRDT_element = sig
   type t
   (** [t] is a (potentially) abstract type representing the element leaves
       in the CRDT data structure.*)
+
   val equal : t -> t -> bool
   (** [equal a b] is [true] if [a] and [b] are structurally equivalent.*)
+
   val pp : Format.formatter -> t -> unit
   (** [pp fmt t] is [t] pretty-printed on [fmt].*)
 end
@@ -87,6 +89,10 @@ module CRDT(E: CRDT_element) :
         [{!merge} t ({!singleton} author new_marker new_element)] with the
         singleton being inserted into [t] immediately after [insertpoint].
     *)
+
+    val kill_marker : t -> Marker.t -> t
+    (** [kill_marker t marker] is [t] with the {!element} corresponding to
+        [marker] marked as a {!element.Tombstone}.*)
 
     module Snapshot : sig
       type snapshot = (Marker.t * element) Pvec.t (* TODO make private*)

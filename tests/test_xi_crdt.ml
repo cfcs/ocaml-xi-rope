@@ -50,26 +50,6 @@ let test_singleton_merge () : unit =
     (Pvec.of_list ['c';'b';'a';'d';'e'])
     (C.Snapshot.to_vector snap_edcba)
 
-let test_singleton_qc_merge () : unit =
-  (* TODO this generates a LOT of output since each Alcotest.check
-     turns into a file in the filesystem.
-     Consider using check_cell_exn and only report back to Alcotest at the end*)
-  QCheck.Test.check_exn @@ QCheck.Test.make ~count:1000
-    ~name:"quickcheck permutations of singleton merges"
-    (QCheck.make qc_singleton_permutations)
-    (fun (a,b) ->
-       let merge_and_snapshot lst =
-         Array.fold_left C.merge C.empty lst |> C.Snapshot.of_t in
-       let a,b = (merge_and_snapshot a), (merge_and_snapshot b) in
-       if Pvec.equal ~eq:(fun (a,b) (c,d) ->
-           C.Marker.equal a c && C.element_equal b d) a b
-       then true
-       else begin (* complain if they are not equal: *)
-         Alcotest.(check a_snapshot)
-           "quickcheck permutations of singleton merges"
-           (a) (b) ; false
-       end )
-
 let test_singleton_append () : unit =
   let a = C.singleton 3l (m 10L) 'a' in
   let b = C.singleton 1l (m 20L) 'b' in
@@ -137,11 +117,96 @@ let test_update_with_vector () : unit =
       5 (Pvec.length snap_xaxbc) ;
     Alcotest.(check a_char_vec)
       "{x;a;x} to_vector [x;b;c] produces [x;-;b;-;c]"
-      (Pvec.of_list ['x';'-';'b';'-';'c'])
+      (Pvec.of_list ['x';'-'(*'a'*);'-'(*x*);'b';'c'])
       (Pvec.map (function _,C.Live c -> c
                         | _,C.Tombstone _ -> '-') snap_xaxbc)
   in
+  let () =
+    let c_b = C.singleton 2l (m 20L) 'b' in
+    let ab = C.merge c_a c_b in
+    let pvec_ab = Pvec.of_list ['a';'b'] in
+    let pvec_b = Pvec.of_list ['b'] in
+    let snap_ab = C.Snapshot.of_t ab in
+    let oldvec = C.Snapshot.to_vector snap_ab in
+    Alcotest.(check a_char_vec)
+      "merge a b |> to_vector is Pvec [a;b]" pvec_ab oldvec;
+    let vec = Pvec.rem oldvec 0 in (* remove 'a' *)
+    Alcotest.(check a_char_vec)
+      "Pvec [a;b] rem 0 is [b]" pvec_b vec ;
+    let ab_minus_a = C.update_with_vector 3l ab vec in
+    let snap_ab_minus_a = C.Snapshot.of_t ab_minus_a in
+    let vec_ab_minus_a = C.Snapshot.to_vector snap_ab_minus_a in
+    Alcotest.(check a_char_vec)
+      "ab minus a = ['b']"
+      (Pvec.of_list ['b']) vec_ab_minus_a ;
+    let ab_minus_a_plus_a = C.update_with_vector 4l ab_minus_a oldvec in
+    let snap_ab_minus_a_plus_a = C.Snapshot.of_t ab_minus_a_plus_a in
+    let restored_vec_ab = C.Snapshot.to_vector snap_ab_minus_a_plus_a in
+    Alcotest.(check a_char_vec)
+      "Pvec [a;b] |> rem 0 |> update_with [a] is [a;b]"
+      pvec_ab restored_vec_ab ;
+    ()
+  in
   ()
+
+let test_singleton_qc_merge () : unit =
+  (* Consider using check_cell_exn and only report back to Alcotest at the end*)
+
+  (* Turn off logging to avoid writing 300 MB to disk: *)
+  let old_log_level = Logs.level () in
+  Logs.set_level (None) ;
+
+  QCheck.Test.check_exn @@ QCheck.Test.make ~count:1000
+    ~name:"quickcheck permutations of singleton merges"
+    (QCheck.make qc_singleton_permutations)
+    (fun (a,b) ->
+       let merge_and_snapshot lst =
+         Array.fold_left C.merge C.empty lst |> C.Snapshot.of_t in
+       let a,b = (merge_and_snapshot a), (merge_and_snapshot b) in
+       if Pvec.equal ~eq:(fun (a,b) (c,d) ->
+           C.Marker.equal a c && C.element_equal b d) a b
+       then true
+       else begin (* complain if they are not equal: *)
+         Alcotest.(check a_snapshot)
+           "quickcheck permutations of singleton merges"
+           (a) (b) ; false
+       end ) ;
+  Logs.set_level old_log_level
+
+let test_qc_update_with_vector () : unit =
+  (* Turn off logging to avoid writing 300 MB to disk: *)
+  let old_log_level = Logs.level () in
+  Logs.set_level (None) ;
+  let shuffle_ac =
+    let open QCheck.Gen in
+    array_size (int_bound 17) char >>= fun arr_a ->
+    let arr_b = Array.copy arr_a in
+    shuffle_a arr_b >|= fun () ->
+    arr_a , arr_b
+  in
+  QCheck.Test.check_exn @@ QCheck.Test.make ~count:1000
+    ~name:"quickcheck update_with_vector random permutations"
+    (QCheck.make shuffle_ac)
+    (fun (arr_1,arr_2) ->
+       let g_vec_1, g_vec_2 = Pvec.(of_array arr_1, of_array arr_2) in
+       let a = C.update_with_vector 1l C.empty g_vec_1 in
+       let b = C.update_with_vector 2l a g_vec_2 in
+       let vec_a = C.Snapshot.(of_t a |> to_vector) in
+       let vec_b = C.Snapshot.(of_t b |> to_vector) in
+       if Pvec.equal ~eq:(fun ach bch -> Char.equal ach bch) g_vec_1 vec_a
+           && Pvec.equal ~eq:(fun ach bch -> Char.equal ach bch) g_vec_2 vec_b
+       then true
+       else begin (* complain if they are not equal: *)
+         Alcotest.(check a_char_vec)
+           "quickcheck update_with_vector from random"
+           (g_vec_1) (vec_a) ;
+         Alcotest.(check a_char_vec)
+           "quickcheck update_with_vector from random updated with vec"
+           (g_vec_2) (vec_b) ;
+         false
+       end ) ;
+  Logs.set_level old_log_level
+
 
 (*
 this should produce 'n';'a' with 'n' having a constraint to be < 'a':
@@ -156,5 +221,6 @@ let tests : unit Alcotest.test_case list = [
   "singleton merge", `Quick, test_singleton_merge ;
   "singleton append", `Quick, test_singleton_append ;
   "update_with_vector", `Quick, test_update_with_vector ;
-  "singleton quickcheck merge", `Slow, test_singleton_qc_merge ;
+  "quickcheck singleton merges", `Slow, test_singleton_qc_merge ;
+  "quickcheck update_with_vector", `Slow, test_qc_update_with_vector ;
 ]

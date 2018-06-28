@@ -24,9 +24,9 @@ module CRDT(E: CRDT_element) = struct
   end = struct
     type t = int64
     let beginning : t = -1_L     (* Int64.min_int *)
-    let ending    : t = 666_L (* Int64.max_int *)
+    let ending    : t = Int64.max_int
     let compare = Int64.compare
-    let pp = Fmt.int64
+    let pp fmt num = Fmt.pf fmt "0x%02Lx" num
     let equal = Int64.equal
     let of_int64 i = i
     let generate () : t =
@@ -163,6 +163,11 @@ module CRDT(E: CRDT_element) = struct
                      |> insert {left=marker; right=Marker.ending; author});
     }
 
+  let kill_marker t marker =
+    {t with elements = Markers.update marker (function
+         | Some (Live elt) -> Some (Tombstone elt)
+         | otherwise -> otherwise) t.elements}
+
   let merge t1 t2 =
     { elements = Markers.union (fun _ a b -> if a = b
                                  then Some a
@@ -197,7 +202,10 @@ module CRDT(E: CRDT_element) = struct
                                  right = marker; author} acc
            | _ -> Edges.insert { left = fst @@ Pvec.get snapshot (pred idx) ;
                                  right = marker; author} acc
-        ) Edges.(empty |> insert { left = fst @@ Pvec.get_last snapshot ;
+        ) Edges.(empty |> insert { left = (if Pvec.is_empty snapshot then
+                                             Marker.beginning
+                                           else
+                                             fst @@ Pvec.get_last snapshot) ;
                                    right = Marker.ending ; author })
         snapshot |> fun produced_edges ->
       Logs.debug (fun m -> m "to_edges: %a produced: %a"
@@ -354,84 +362,104 @@ module CRDT(E: CRDT_element) = struct
 
     let extend_with_vector
         (current_snapshot:snapshot) (original_vector:E.t Pvec.t) : snapshot =
+      let pp_pair = Fmt.(pair ~sep:(unit ":") Marker.pp pp_element) in
       let make_live element =
-        let mark = Marker.generate() in
+        let mark = Marker.generate(), Live element in
         Logs.debug (fun m ->
-            m "Creating marker (%a, Live %a)" Marker.pp mark E.pp element);
-        mark , Live element in
+            m "Creating marker (%a)" pp_pair mark);
+        mark
+      in
       let with_markers = Pvec.map make_live in
-      Pvec.foldi_left (fun (acc,old_vector) _idx b_with_marker ->
+      Pvec.foldi_left (fun (acc,(old_vector:elt Pvec.t)) _idx b_with_marker ->
           begin match Pvec.pop_first old_vector with
             | None -> (*done dealing with the source*)
-              Logs.debug (fun m -> m "Adding remaining %d old_vec"
-                           @@ Pvec.length old_vector);
-              Pvec.add_last acc b_with_marker, old_vector
+              Logs.debug (fun m -> m "Adding b<%a> and remaining old_vec %d: %a"
+                             pp_pair b_with_marker
+                             (Pvec.length old_vector)
+                             (Pvec.pp ~sep:Fmt.(unit", ") E.pp) old_vector);
+              acc, old_vector
             | Some (vec_element, vector_tl) ->
               (* TODO make sure both are alive before all this *)
-              let b_element = (match snd b_with_marker with Live x -> x
-                                                          | Tombstone x -> x) in
-              if E.equal b_element vec_element
+              let b_element = snd b_with_marker in
+              let b_elt = (match snd b_with_marker with Live x -> x
+                                                      | Tombstone x -> x) in
+              if element_equal b_element (Live vec_element)
               then begin (* the subsets are equivalent: *)
                 Logs.debug (fun m ->
                     m "extend_with_vector: adding equal %a element"
-                      E.pp b_element);
+                      pp_pair b_with_marker);
                 Pvec.add_last acc b_with_marker, vector_tl
               end else begin
                 (* check if vector contains b's element
                    further down the road: *)
                 begin match
-                    Pvec.left_find (E.equal b_element) vector_tl with
+                    Pvec.left_find (E.equal b_elt) vector_tl with
                 | Some (next_idx, _) ->
                   (* - if it does: insert everything between here and there,
                        with new markers, increment offset *)
                   let left, right = Pvec.break_left next_idx vector_tl in
                   let right = Pvec.drop_left 1 right in
-                  let acc = Pvec.add_last acc (make_live vec_element) in
+                  let new_vec_element = make_live vec_element in
+                  Logs.debug (fun m -> m "insubset adding to acc: %a"
+                                 pp_pair new_vec_element );
+                  let acc = Pvec.add_last acc new_vec_element in
                   Logs.debug (fun m ->
                       m "extend_with_vector: adding left (%a) ; %a \
-                         ;right(%a) subsets from %d"
-                        (Pvec.pp E.pp) left E.pp b_element
+                         ; right(%a) subsets from %d"
+                        (Pvec.pp E.pp) left
+                        pp_pair b_with_marker
                         (Pvec.pp E.pp) right next_idx);
-                  let acc = Pvec.add_last acc b_with_marker in
-                  Pvec.append acc (with_markers left), right
+                  let acc =
+                    Pvec.append acc (with_markers left)
+                    |> fun acc -> Pvec.add_last acc b_with_marker in
+                  acc , right
                 | None ->
                   (*- if it doesn't: mark b as dead and insert it: *)
+                  let dead_b = fst b_with_marker, Tombstone b_elt in
                   Logs.debug (fun m -> m "extend_with_vector: adding dead %a \
-                                          element and live %a"
-                                 E.pp b_element E.pp vec_element);
-                  ( Pvec.add_last acc (fst b_with_marker, Tombstone b_element)
-                    (* then append vec_element: *)
-                    |> fun acc -> Pvec.add_last acc (make_live vec_element)),
-                  vector_tl
+                                          element" pp_pair dead_b);
+                  ( Pvec.add_last acc dead_b,
+                    (* leave old vector intact: *) old_vector)
                 end
               end
           end
         )
         (Pvec.empty, original_vector) current_snapshot
       |> fun (produced, tl) ->
-      Logs.debug (fun m -> m "produced: %d tl: %d: %a" (Pvec.length produced)
-                     (Pvec.length tl) pp produced) ;
+      Logs.debug (fun m -> m "produced: @[<v>%d [%a]@ \
+                              tl: %d: [%a]@]"
+                     (Pvec.length produced) pp produced
+                     (Pvec.length tl) (Pvec.pp ~sep:Fmt.(unit">")E.pp) tl) ;
       Pvec.append produced (with_markers tl)
   end
 
   let update_with_vector author (t:t) vector =
     let old_snapshot = Snapshot.of_t t in
+    Logs.debug (fun m -> m "update_with_vector: old_snapshot: %a"
+                   Snapshot.pp old_snapshot);
     let next_snapshot = Snapshot.extend_with_vector old_snapshot vector in
+    Logs.debug (fun m -> m "update_with_vector: next_snapshot: %a"
+                   Snapshot.pp next_snapshot);
     let next_elements =
       let new_elements = Snapshot.elements next_snapshot in
       (* produce a union just in case TODO this shouldn't be needed unless [t]
          contains elements not in the snapshot ... which it shouldn't.*)
-      Markers.union (fun marker a b ->
+      Markers.merge (fun marker a b ->
           match a, b with
-          | Tombstone _a, Live _b ->
+          | None, elt_b -> elt_b (* new element *)
+
+          | Some (Tombstone elt_a | Live elt_a), None ->
+            Some (Tombstone elt_a) (* old dead element *)
+
+          | Some (Tombstone _), Some (Live _b) ->
             Logs.err (fun m -> m "Illegal Tombstone->Live resurrection of %a"
                          Marker.pp marker ) ;
             failwith "TODO illegal state transition: Tombstone->Live"
-          | Tombstone elt_a, Tombstone elt_b
-          | Live      elt_a, Tombstone elt_b
-          | Live      elt_a, Live elt_b ->
+
+          | Some (Tombstone elt_a |Live elt_a),Some ((Tombstone elt_b) as right)
+          | Some (Live      elt_a), Some ((Live elt_b) as right)->
             if E.equal elt_a elt_b
-            then Some b (* pick [b] to support tombstoning*)
+            then Some right (* pick [b] to support tombstoning*)
             else begin
               Logs.err (fun m ->
                   m "TODO marker %a is not unique!" Marker.pp marker) ;
@@ -479,7 +507,7 @@ end
 
 module CharCRDT = struct
   module Char = struct include Char
-    let pp fmt = Fmt.pf fmt "%c"
+    let pp fmt = Fmt.pf fmt "%C"
   end
   include CRDT(Char)
 end
