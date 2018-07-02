@@ -5,4 +5,6 @@ true: package(fmt logs.fmt pvec rresult uchar)
 "lib": include
 <lib/*_top*>: package(compiler-libs.toplevel)
 
+<demo/*>: package(notty.lwt lwt)
+
 <tests/*>: package(alcotest qcheck)

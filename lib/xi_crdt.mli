@@ -31,6 +31,9 @@ module CRDT(E: CRDT_element) :
     type elt = E.t
     (** The type of the underlying elements, ie the user's data.*)
 
+    val pp_elt : Format.formatter -> E.t -> unit
+    (** [pp_elt] is {!E.pp}.*)
+
     type element = private | Live of elt
                            | Tombstone of elt
     val pp_element : Format.formatter -> element -> unit
@@ -43,7 +46,7 @@ module CRDT(E: CRDT_element) :
     (** [element_equal_ignoring_status a b] is [{!E.equal} a b], regardless of
         the liveness of the two. See {!element_equal}.*)
 
-    module Marker : sig
+    module rec Marker : sig
       type t (** A marker uniquely represents an element in the set *)
 
       val beginning : t (** The beginning of the rope *)
@@ -96,6 +99,10 @@ module CRDT(E: CRDT_element) :
 
     module Snapshot : sig
       type snapshot = (Marker.t * element) Pvec.t (* TODO make private*)
+
+      val live_elements : snapshot -> (Marker.t * elt) Pvec.t
+      (** [live_elements snapshot] is a new {!Pvec.t} vector
+          consisting of the subset of {!element.Live} {!elt}'s in [snapshot].*)
 
       val pp : Format.formatter -> snapshot -> unit
 

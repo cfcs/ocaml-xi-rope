@@ -144,8 +144,165 @@ let test_update_with_vector () : unit =
     let restored_vec_ab = C.Snapshot.to_vector snap_ab_minus_a_plus_a in
     Alcotest.(check a_char_vec)
       "Pvec [a;b] |> rem 0 |> update_with [a] is [a;b]"
-      pvec_ab restored_vec_ab ;
-    ()
+      pvec_ab restored_vec_ab
+  in
+  let () =
+    let vec_abc = Pvec.(of_list ['a';'b';'c']) in
+    let abc = C.(update_with_vector 1l empty vec_abc) in
+    let zero = C.update_with_vector 2l abc Pvec.empty in
+    let restored_1 = C.update_with_vector 3l zero vec_abc in
+    let restored_1_vec = C.Snapshot.(of_t restored_1 |> to_vector) in
+    Alcotest.(check a_char_vec)
+      "[a;b;c] -> [] -> [a;b;c]"
+      vec_abc restored_1_vec ;
+    let redeleted_1 = C.update_with_vector 4l restored_1 Pvec.empty in
+    let restored_2 = C.update_with_vector 5l redeleted_1 vec_abc in
+    let restored_2_vec = C.Snapshot.(of_t restored_2 |> to_vector) in
+    Alcotest.(check a_char_vec)
+      "[a;b;c] -> [] -> [a;b;c] -> [] -> [a;b;c]"
+      vec_abc restored_2_vec ;
+    let redeleted_2 = C.update_with_vector 6l restored_2 Pvec.empty in
+    let restored_3 = C.update_with_vector 7l redeleted_2 vec_abc in
+    let restored_3_vec = C.Snapshot.(of_t restored_3 |> to_vector) in
+    Alcotest.(check a_char_vec)
+      "[a;b;c] -> [] -> [a;b;c] -> [] -> [a;b;c] -> [] -> [a;b;c]"
+      vec_abc restored_3_vec ;
+  in
+  (* TODO in demo: ab^H^Hab^H^Hab -> ba ???? WTF *)
+  let () =
+    let vec_ab = Pvec.of_list ['a';'b'] in
+    let ab_1 = C.update_with_vector 1l C.empty vec_ab in (* [a;b] *)
+    let ab_1_snap = C.Snapshot.of_t ab_1 in
+    let killed_1 = Pvec.fold_left (fun t (marker,_)->
+        C.kill_marker t marker (* ^H^H = [] *)
+      ) ab_1 ab_1_snap in
+    let ab_2 = C.update_with_vector 2l killed_1 vec_ab in (* [a;b] *)
+    let ab_2_snap = C.Snapshot.of_t ab_2 in
+    let killed_2 = Pvec.fold_left (fun t (marker,_)->
+        C.kill_marker t marker (* ab^H^H = [] *)
+      ) ab_2 ab_2_snap in
+    let ab_3 = C.update_with_vector 2l killed_2 vec_ab in (* [a;b]*)
+    let ab_3_snap = C.Snapshot.of_t ab_3 in
+    let ab_3_vec = C.Snapshot.to_vector ab_3_snap in
+    Alcotest.(check a_char_vec)
+      "[a;b] -> ^H^H -> [a;b] -> ^H^H -> [a;b]"
+      vec_ab ab_3_vec
+  in
+  let () = (* test regression *)
+    let vec_123 = Pvec.of_list ['1';'2';'3'] in
+    let old = C.(update_with_vector 1l empty vec_123) in
+    let next = C.update_with_vector 2l old Pvec.empty in
+    let last = C.update_with_vector 3l next vec_123 in
+    let last_vec = C.Snapshot.(of_t last |> to_vector) in
+    Alcotest.(check a_char_vec)
+      "[1;2;3] -> [] -> [1;2;3]"
+      vec_123 last_vec
+  in
+  let () = (* test regression *)
+    let last_live c = C.Snapshot.(of_t c |> live_elements) |> Pvec.get_last in
+    let vec_1 = Pvec.of_list ['1'] in
+    let vec_12 = Pvec.of_list ['1';'2'] in
+    let vec_123 = Pvec.of_list ['1';'2';'3'] in
+    let c1 = C.update_with_vector 1l C.empty vec_1 in
+    Alcotest.(check a_char_vec)
+      "1; = [1;]"
+      vec_1 C.Snapshot.(of_t c1 |> to_vector) ;
+    let c2 = C.update_with_vector 2l c1 vec_12 in
+    Alcotest.(check a_char_vec)
+      "1;2 = [1;2]"
+      vec_12 C.Snapshot.(of_t c2 |> to_vector) ;
+    let c3 = C.update_with_vector 3l c2 vec_123 in
+    Alcotest.(check a_char_vec)
+      "1;2;3 = [1;2;3]"
+      vec_123 C.Snapshot.(of_t c3 |> to_vector) ;
+    let c4 = C.kill_marker c3 (last_live c3 |> fst) in
+    Alcotest.(check a_char_vec)
+      "1;2;3 -> ^H = [1;2]"
+      vec_12 C.Snapshot.(of_t c4 |> to_vector) ;
+    let c5 = C.kill_marker c4 (last_live c4 |> fst) in
+    Alcotest.(check a_char_vec)
+      "1;2;3 -> ^H^H = [1;]"
+      vec_1 C.Snapshot.(of_t c5 |> to_vector) ;
+    let c6 = C.kill_marker c5 (last_live c5 |> fst) in
+    Alcotest.(check a_char_vec)
+      "1;2;3 -> ^H^H^H = []"
+      Pvec.empty C.Snapshot.(of_t c6 |> to_vector) ;
+    let c7 = C.update_with_vector 7l c6 vec_1 in
+    Alcotest.(check a_char_vec)
+      "1;2;3 -> ^H^H^H -> 1; = [1;]"
+      vec_1 C.Snapshot.(of_t c7 |> to_vector) ;
+    let c8 = C.update_with_vector 8l c7 vec_12 in
+    Alcotest.(check a_char_vec)
+      "1;2;3 -> ^H^H^H -> 1;2 = [1;2]"
+      vec_12 C.Snapshot.(of_t c8 |> to_vector) ;
+    let c9 = C.update_with_vector 9l c8 vec_123 in
+    Alcotest.(check a_char_vec)
+      "1;2;3 -> ^H^H^H -> 1;2;3 = [1;2;3]"
+      vec_123 C.Snapshot.(of_t c9 |> to_vector) ;
+    let c10 = C.kill_marker c9  (last_live c9 |> fst) in
+    Alcotest.(check a_char_vec)
+      "1;2;3 -> ^H^H^H -> 1;2;3 -> ^H = [1;2]"
+      vec_12 C.Snapshot.(of_t c10 |> to_vector) ;
+    let c11 = C.kill_marker c10 (last_live c10 |> fst) in
+    Alcotest.(check a_char_vec)
+      "1;2;3 -> ^H^H^H -> 1;2;3 -> ^H^H = [1;]"
+      vec_1 C.Snapshot.(of_t c11 |> to_vector) ;
+    let c12 = C.kill_marker c11 (last_live c11 |> fst) in
+    Alcotest.(check a_char_vec)
+      "123-> ^H^H^H -> 123 -> ^H^H^H = []"
+      Pvec.empty C.Snapshot.(of_t c12 |> to_vector) ;
+    let c13 = C.update_with_vector 13l c12 vec_1 in
+    Alcotest.(check a_char_vec)
+      "1;2;3 -> ^H^H^H -> 1;2;3 -> ^H^H^H -> 1; = [1;]"
+      vec_1 C.Snapshot.(of_t c13 |> to_vector) ;
+    let c14 = C.update_with_vector 14l c13 vec_12 in
+    Alcotest.(check a_char_vec)
+      "1;2;3 -> ^H^H^H -> 1;2;3 -> ^H^H^H -> 1;2 = [1;2]"
+      vec_12 C.Snapshot.(of_t c14 |> to_vector) ;
+    let c15 = C.update_with_vector 15l c14 vec_123 in
+    Alcotest.(check a_char_vec)
+      "1;2;3 -> ^H^H^H -> 1;2;3 -> ^H^H^H -> 1;2;3 = [1;2;3]"
+      vec_123 C.Snapshot.(of_t c15 |> to_vector) ;
+  in
+  let () = (* regression, stack overflow in line 271 *)
+    for i = 0 to 50 do
+      let pv = Pvec.of_list in let uv = C.update_with_vector 1l in
+      let tovec c = C.Snapshot.(of_t c |> to_vector) in
+      let c1 = uv C.empty (pv['a']) in
+      let c2 = uv c1 (pv['a';'b']) in
+      Alcotest.(check a_char_vec) " c2: a -> ab"
+        (pv ['a';'b']) (tovec c2) ;
+      let c3 = uv c2 (pv[]) in
+      let c4 = uv c3 (pv['a']) in
+      Alcotest.(check a_char_vec) " c4: a -> ab -> [] -> a"
+        (pv ['a']) (tovec c4);
+      let c5 = uv c4 (pv['a';'b']) in
+      Alcotest.(check a_char_vec) " c5: a -> ab -> [] -> a -> ab"
+        (pv ['a';'b']) (tovec c5);
+      let c6 = uv c5 (pv[]) in
+      Alcotest.(check a_char_vec) " c6: a -> ab -> [] -> a -> ab -> []"
+        (pv []) (tovec c6);
+      let c7 = uv c6 (pv['a']) in
+      Alcotest.(check a_char_vec) " c7: a -> ab -> [] -> a -> ab -> [] -> a"
+        (pv ['a']) (tovec c7);
+      let c8 = uv c7 (pv['a';'b']) in
+      Alcotest.(check a_char_vec) " c8: a -> ab -> [] -> a -> ab -> [] -> a -> \
+                                   ab"
+        (pv ['a';'b']) (tovec c8);
+      let c9 = uv c8 (pv[]) in
+      Alcotest.(check a_char_vec) " c9: a -> ab -> [] -> a -> ab -> [] -> a -> \
+                                   ab -> []"
+        (pv []) (tovec c9);
+      let c10 = uv c9 (pv['a']) in
+      Alcotest.(check a_char_vec) "c10: a -> ab -> [] -> a -> ab -> [] -> a -> \
+                                   ab -> [] -> a"
+        (pv ['a']) (tovec c10);
+      let c11 = uv c10 (pv['a';'b']) in
+      Alcotest.(check a_char_vec) "c11: a -> ab -> [] -> a -> ab -> [] -> a -> \
+                                   ab -> [] -> a -> ab"
+        (pv ['a';'b'])
+        (tovec c11)
+    done
   in
   ()
 
