@@ -8,7 +8,7 @@ module CRDT(E: CRDT_element) = struct
 
   type elt = E.t
 
-  type author_id = int32
+  type author_id = int32 (* a.k.a. vertice "weight" *)
 
   let prng = Random.State.make_self_init ()
 
@@ -20,6 +20,7 @@ module CRDT(E: CRDT_element) = struct
     val pp : Format.formatter -> t -> unit
     val equal : t -> t -> bool
     val of_int64 : int64 -> t
+    val to_int64 : t -> int64
     val generate : unit -> t
   end = struct
     type t = int64
@@ -29,6 +30,7 @@ module CRDT(E: CRDT_element) = struct
     let pp fmt num = Fmt.pf fmt "0x%02Lx" num
     let equal = Int64.equal
     let of_int64 i = i
+    let to_int64 i = i
     let generate () : t =
       let rec skip num =
         if equal num beginning || equal num ending
@@ -43,9 +45,10 @@ module CRDT(E: CRDT_element) = struct
     | Tombstone of elt
 
   let pp_element fmt element =
-    (match element with Live e -> "+",e | Tombstone e -> "-", e)
-    |> fun  (s,s2) ->
-    Fmt.pf fmt "(%s %a)" s E.pp s2
+    (match element with Live e -> `Green,"+",e | Tombstone e -> `Red, "-", e)
+    |> fun  (color,s,s2) ->
+    Fmt.pf fmt "(%a)" Fmt.(styled `Bold @@ styled color
+                              @@ pair ~sep:(unit" ") string E.pp) (s,s2)
 
   let element_equal a b = match a , b with
     | Live      a, Live b -> E.equal a b
@@ -57,12 +60,15 @@ module CRDT(E: CRDT_element) = struct
                                                     | Tombstone a -> a)
 
   module Markers = struct
+    (* Map of markers -> element *)
     include Map.Make(Marker)
     let pp fmt t =
       iter (fun marker -> fun element ->
           Fmt.pf fmt "(%a:%a)" Marker.pp marker pp_element element
         ) t
   end
+
+  module MarkerSet = Set.Make(Marker)
 
   type edge =
     { left: Marker.t ;
@@ -73,21 +79,9 @@ module CRDT(E: CRDT_element) = struct
   let pp_edge fmt v =
     Fmt.pf fmt "{%a < %a [%ld]}" Marker.pp v.left Marker.pp v.right v.author
 
-  module Edges : sig
-    type t
-    val empty : t
-    val insert : edge -> t -> t
-    val union : t -> t -> t
-    val pp : Format.formatter -> t -> unit
-    val fold : ('a -> edge -> 'a) -> 'a -> t -> 'a
-    val filter : (edge -> bool) -> t -> t
-    val exists : (edge -> bool) -> t -> bool
-    val equal : t -> t -> bool
-  end
-  = struct
-    include List
-    type t = edge list
-    let empty = []
+  module EdgeOrder = struct
+    type t = edge
+
     let compare a b = (* this is NOT topological comparison!*)
       let left_compare = Marker.compare a.left b.left in
       if 0 <> left_compare then left_compare
@@ -98,13 +92,28 @@ module CRDT(E: CRDT_element) = struct
           Marker.compare a.right b.right
         end
       end
-    let union (a:t) (b:t) = a @ b |> List.sort_uniq compare
-    let insert a t = a::t
+  end
+
+  module Edges : sig
+    type t
+    val empty : t
+    val insert : edge -> t -> t
+    val union : t -> t -> t
+    val pp : Format.formatter -> t -> unit
+    val fold : (edge -> 'a -> 'a) -> t -> 'a -> 'a
+    val filter : (edge -> bool) -> t -> t
+    val exists : (edge -> bool) -> t -> bool
+    val equal : t -> t -> bool
+    val remove : edge -> t -> t
+    val is_empty : t -> bool
+  end
+  = struct
+    include Set.Make(EdgeOrder)
+    let insert = add
     let pp fmt (t:t) =
       Fmt.pf fmt "@[<v>%a@]" Fmt.(parens @@ list ~sep:(unit "; ") pp_edge)
-        List.(sort (fun {left=a;_} {left=b;_} -> Marker.compare a b)t)
-    let fold = List.fold_left
-    let exists : (edge -> bool) -> t -> bool = List.exists
+        List.(sort (fun {left=a;_} {left=b;_} -> Marker.compare a b)
+                (elements t) )
     let equal a b = a = b
   end
 
@@ -138,14 +147,16 @@ module CRDT(E: CRDT_element) = struct
     { elements : element Markers.t ;
       edges    : Edges.t ;
       edits    : Edits.t ;
+      authors  : author_id Markers.t ;
     }
 
   let equal t1 t2 =
     Markers.equal element_equal t1.elements t2.elements
     && Edges.equal t1.edges t2.edges
     && Edits.equal t1.edits t2.edits
+    && Markers.equal Int32.equal t1.authors t2.authors
 
-  let pp fmt {elements; edges; edits} =
+  let pp fmt {elements; edges; edits; authors = _ } =
     Fmt.pf fmt "@[<v>{ @[<v>elements: %a;@ edges: %a@ edits: %a@]@ }@]"
       Markers.pp elements
       Edges.pp edges
@@ -156,19 +167,26 @@ module CRDT(E: CRDT_element) = struct
       edges = Edges.insert { left = Marker.beginning; right = Marker.ending;
                              author = -1l } Edges.empty;
       edits = Edits.empty ;
+      authors = Markers.empty
+                |> Markers.add Marker.beginning (-1l)
+                |> Markers.add Marker.ending (-1l) ;
     }
 
   let singleton author marker element=
-    { empty with elements = Markers.singleton marker (Live element)  ;
+    { empty with elements = Markers.add marker (Live element) empty.elements ;
                  edges = Edges.(
                      insert {left=Marker.beginning; right=marker; author} empty
                      |> insert {left=marker; right=Marker.ending; author});
+                 authors = Markers.add marker author empty.authors ;
     }
 
   let kill_marker t marker =
-    let next_elements = Markers.update marker (function
-         | Some (Live elt) -> Some (Tombstone elt)
-         | otherwise -> otherwise) t.elements in
+    let next_elements = Markers.mapi (fun elt_marker ->
+        if elt_marker <> marker then (fun a -> a)
+        else function
+          | Live elt -> Tombstone elt
+          | otherwise -> otherwise
+      ) t.elements in
     Logs.debug (fun m ->
         m "KILLING marker %a in @[<v>old: %a@ next: %a@]" Marker.pp marker
           Markers.pp t.elements
@@ -182,136 +200,238 @@ module CRDT(E: CRDT_element) = struct
           t1.elements t2.elements ;
       edges = Edges.union t1.edges t2.edges ;
       edits = Edits.union t1.edits t2.edits ;
+      authors = Markers.union (fun _ a b -> if a = b
+                                then Some a
+                                else failwith "TODO marker id conflict")
+          t1.authors t2.authors ;
     }
 
   module Snapshot = struct
-    type snapshot = (Marker.t * element) Pvec.t
+    type snapshot = ((author_id * Marker.t) * element) Pvec.t
 
     let elements (snapshot:snapshot) : element Markers.t =
-      Pvec.fold_left (fun acc (marker, element) ->
+      Pvec.fold_left (fun acc ((_author, marker), element) ->
           Markers.add marker element acc) Markers.empty snapshot
 
     let live_elements (snapshot:snapshot) : (Marker.t * elt) Pvec.t =
-      Pvec.fold_left (fun vec ->
-          function | (marker, Live elt) -> Pvec.add_last vec (marker, elt)
-                   | _ -> vec) Pvec.empty snapshot
+      Pvec.fold_left (fun vec -> function
+          | ((_author, marker), Live elt) -> Pvec.add_last vec (marker, elt)
+          | _ -> vec) Pvec.empty snapshot
 
     let equal (a:snapshot) (b:snapshot) : bool =
-      Pvec.equal a b ~eq:(fun a b ->
-          Marker.equal (fst a) (fst b)
-          && element_equal_ignoring_status (snd a) (snd b))
+      Pvec.equal a b ~eq:(fun
+                           ((a_auth, a_mark), a_elt)
+                           ((b_auth, b_mark), b_elt) ->
+          Int32.equal     (a_auth) (b_auth)
+          && Marker.equal (a_mark) (b_mark)
+          && element_equal_ignoring_status (a_elt) (b_elt))
 
     let pp : Format.formatter -> snapshot -> unit =
       Pvec.pp ~sep:Fmt.(unit " -> ")
-        Fmt.(pair ~sep:(unit":") Marker.pp pp_element)
+        Fmt.(pair ~sep:(unit":") (pair ~sep:comma int32 Marker.pp) pp_element)
 
-    let to_edges author (snapshot:snapshot) : Edges.t =
+    let to_edges (snapshot:snapshot) : Edges.t =
       Pvec.foldi_left
-        (fun acc (idx:int) (marker, _) ->
+        (fun acc (idx:int) ((author,marker), _) ->
            match idx with
            | 0 when Marker.equal marker Marker.beginning -> acc
            | 0 -> Edges.insert { left = Marker.beginning;
                                  right = marker; author} acc
-           | _ -> Edges.insert { left = fst @@ Pvec.get snapshot (pred idx) ;
+           | _ -> Edges.insert { left = snd@@fst@@Pvec.get snapshot (pred idx) ;
                                  right = marker; author} acc
-        ) Edges.(empty |> insert { left = (if Pvec.is_empty snapshot then
-                                             Marker.beginning
-                                           else
-                                             fst @@ Pvec.get_last snapshot) ;
-                                   right = Marker.ending ; author })
+        ) Edges.(empty |> insert
+                   (let author, left =
+                      if Pvec.is_empty snapshot
+                      then (-1l), Marker.beginning
+                      else fst @@ Pvec.get_last snapshot
+                    in { left ;
+                         right = Marker.ending ;
+                         author }))
         snapshot |> fun produced_edges ->
       Logs.debug (fun m -> m "to_edges: %a produced: %a"
                      pp snapshot Edges.pp produced_edges
                  ) ;
       produced_edges
 
-    let to_vector (snapshot:snapshot) : E.t Pvec.t =
-      Pvec.filter_map (function _, Live x -> Some x
-                              | _, Tombstone _ -> None) snapshot
+    let to_vector (snapshot:snapshot) : (author_id * E.t) Pvec.t =
+      Pvec.filter_map (function
+          | _, Tombstone _ -> None
+          | (author, _marker), Live x -> Some (author, x)) snapshot
 
-    let of_t {edges = original_edges ; elements ; _ } : snapshot =
+
+    let incoming_outgoing_multimap edges =
+      assert (Edges.exists (fun e -> e.left = Marker.beginning) edges);
+      assert (Edges.exists (fun e -> e.right = Marker.ending) edges);
+      Edges.fold (fun edge (incoming, outgoing) ->
+          assert (edge.left <> Marker.ending);
+          assert (edge.right <> Marker.beginning);
+          assert (edge.left <> edge.right);
+          let incoming = match Markers.find_opt edge.right incoming with
+            | None ->
+              Markers.add edge.right (MarkerSet.singleton edge.left) incoming
+            | Some set ->
+              Markers.add edge.right (MarkerSet.add edge.left set) incoming
+          in
+          let outgoing = match Markers.find_opt edge.left outgoing with
+            | None ->
+              Markers.add edge.left (MarkerSet.singleton edge.right) outgoing
+            | Some set ->
+              Markers.add edge.left (MarkerSet.add edge.right set) outgoing
+          in
+          incoming, outgoing
+        ) edges (Markers.empty, Markers.empty)
+
+    let kahns (orig_edges: Edges.t) authors (* vertices : unit Markers.t *) =
+      let (incoming_of_node, outgoing_of_node)
+        : MarkerSet.t Markers.t * MarkerSet.t Markers.t =
+        incoming_outgoing_multimap orig_edges
+      in
+      (*
+L ← Empty list that will contain the sorted elements
+S ← Set of all nodes with no incoming edges
+while S is non-empty do
+    remove a node n from S
+    insert n into L
+    for each node m with an edge e from n to m do
+        remove edge e from the graph
+        if m has no other incoming edges then
+            insert m into S
+if graph has edges then
+    return error   (graph has at least one cycle)
+else
+    return L   (a topologically sorted order)
+*)
+
+      let rec for_each_node_m ~n ~(m:Marker.t) edges _S incoming_of_node outgoing_of_node =
+        (* remove edge e from the graph *)
+        let edges = Edges.filter (fun e -> e.left = n && e.right = m) edges in
+        let incoming_of_node =
+          Markers.update m (function
+              | Some m_set -> Some (MarkerSet.remove n m_set)
+              | None -> None) incoming_of_node in
+        let outgoing_of_node =
+          Markers.update m (function
+              | Some m_set -> Some (MarkerSet.remove n m_set)
+              | None -> None) outgoing_of_node in
+        (* check if m has no more incoming edges: *)
+        if (match Markers.find_opt m incoming_of_node with
+            | Some m_set -> MarkerSet.is_empty m_set
+            | None -> true)
+        then begin
+          (* insert m into S: *)
+          Logs.debug (fun msg -> msg "adding %a to _S" Marker.pp m);
+          let _S = MarkerSet.add m _S in
+          edges, _S, incoming_of_node, outgoing_of_node
+        end else begin
+          Logs.debug (fun msg ->
+              msg "NOT adding %a to _S because there are more incoming" Marker.pp m);
+          edges, _S, incoming_of_node, outgoing_of_node
+        end
+      and while_s_nonempty edges _S _L incoming_of_node outgoing_of_node =
+
+        (* TODO instead of "choose" I think this is where we want to
+           handle ties?*)
+        let n = MarkerSet.fold (fun this old ->
+            Logs.debug (fun m -> m "authorhit %a old:%a"
+                           Marker.pp this Marker.pp old);
+            let which =
+            if 1 > Int32.compare
+                 (Markers.find this authors)
+                 (Markers.find old authors) (* TODO *)
+                 (*(try Markers.find this authors with Not_found -> -1l )
+                   (try Markers.find old authors with Not_found -> -1l )*)
+            then this else old
+            in Logs.debug(fun m ->m"which:%a (%ld < %ld)"
+                             Marker.pp which
+                             (Markers.find this authors)
+                             (Markers.find old authors)
+                         );
+            which ) _S (MarkerSet.choose _S)in
+        (* remove a node n from S: *)
+        let _S = MarkerSet.remove n _S in
+        (* add n to tail of L: *)
+        Logs.debug (fun m -> m "adding to L: %a (other _S: %a)" Marker.pp n
+                       Fmt.(list ~sep:(unit" ") Marker.pp)
+                       (MarkerSet.elements _S));
+        let _L = Pvec.add_last _L n in
+        let edges, _S, incoming_of_node, outgoing_of_node =
+          (* for each node m with an edge e from n to m: *)
+          match Markers.find_opt n outgoing_of_node with
+          | None -> edges, _S, incoming_of_node, outgoing_of_node
+          | Some m_set ->
+            Logs.debug (fun m -> m "kahn:%a has outgoing: %a"
+                           Marker.pp n
+                           Fmt.(list ~sep:(unit" ") Marker.pp)
+                           (MarkerSet.elements m_set)
+                       ) ;
+            MarkerSet.fold (fun m
+                             (edges, _S, incoming_of_node, outgoing_of_node) ->
+                for_each_node_m ~n ~m edges _S incoming_of_node outgoing_of_node
+              ) m_set (edges, _S, incoming_of_node, outgoing_of_node)
+        in
+        if not (MarkerSet.is_empty _S) then
+          while_s_nonempty edges _S _L incoming_of_node outgoing_of_node
+        else
+          edges, _S, _L, incoming_of_node, outgoing_of_node
+      in
+      (* First, find a list of "start nodes" which have no incoming edges
+         and insert them into a set S; at least one such node must exist
+         in a non-empty acyclic graph: *)
+      (* TODO ensure edges contains Marker.beginning *)
+      let _S = MarkerSet.singleton Marker.beginning in
+      if not (MarkerSet.is_empty _S) then
+        let edges, _S, _L, _, _  =
+          (* L ← Empty list that will contain the sorted elements *)
+          let _L = Pvec.empty in
+          while_s_nonempty orig_edges _S _L incoming_of_node outgoing_of_node in
+        begin
+          if not (Edges.is_empty edges) then
+            Error (`Msg "not acyclic")
+          else
+            (* if graph has edges then
+                 output error message (graph has at least one cycle)
+               else
+                 output message (proposed topologically sorted order: L) *)
+            Ok _L
+        end
+      else Error (`Msg "edges is not empty at start")
+
+    let of_t {edges = original_edges ; elements ; authors ; _ } : snapshot =
+      (*
+      let _TODO_debug =
+        let pp_marker fmt v = Fmt.pf fmt "%ld~%a:%a"
+            (try Markers.find v authors with Not_found -> -1l)
+            Marker.pp v
+            Fmt.(option pp_element)
+            (try Some (Markers.find v elements) with _ -> None) in
+        let pp_graph desc (graph:MarkerSet.t Markers.t) =
+          Logs.debug (fun m -> m "%s: @[<v>%a@]" desc
+                         Fmt.(list ~sep:(unit "@,")
+                              @@ parens @@ pair ~sep:(unit": ") pp_marker
+                                (list ~sep:(unit"; ")
+                                 @@  pp_marker ))
+                         (Markers.bindings graph
+                          |>
+                          List.map (fun (k,v) -> k, MarkerSet.elements v))
+                     )
+        in
+        let in_TODO, out_TODO = incoming_outgoing_multimap original_edges in
+        pp_graph "incoming map" in_TODO;
+        pp_graph "outgoing map" out_TODO
+      in*)
+      let kahns_stuff () =
+        match kahns original_edges authors with
+        | Error `Msg x ->
+          Logs.err (fun m -> m "kahns failed: %s" x) ;
+          Pvec.empty
+        | Ok vec ->
+          Logs.debug (fun m -> m "kahn's succeeded!");
+          Logs.debug (fun m -> m "%a" (Pvec.pp Marker.pp) vec) ;
+          vec
+      in
+      let markers = kahns_stuff () in
+      (*
       let longest_dag =
-        let group_by_marker (xxx:(Marker.t * 'b list) list)
-          : (Marker.t * 'b list) list =
-          let rec loop acc = function
-            | [] -> acc
-            | (hd_k,hd_v)::tl ->
-              begin match List.assoc_opt hd_k acc with
-                | None -> loop ((hd_k,hd_v)::acc) tl
-                | Some old_v ->
-                  loop ((hd_k, hd_v@old_v)::(List.remove_assoc hd_k acc)) tl
-              end
-          in loop [] xxx
-        in
-        let outgoing_map =
-          ( Edges.fold
-              (fun acc edge ->
-                 if Marker.equal Marker.ending edge.left then
-                   raise @@ Failure "edge has marker  < BEGINNING";
-                 if Marker.equal Marker.beginning edge.right then
-                   raise @@ Failure "edge has ENDING < marker";
-                 if List.mem_assoc edge.left acc then
-                   List.map (fun (x,y) ->
-                       if Marker.equal x edge.left
-                       then x,(edge.author, edge.right)::y
-                       else (x,y)
-                     )acc
-                 else
-                   (edge.left, [(edge.author, edge.right)])::acc)
-              [] original_edges) @ [Marker.ending, []]
-        in
-        let incoming_map =
-          (* TODO this implementation needs to find the LONGEST path through the DAG*)
-          (* https://en.wikipedia.org/wiki/Longest_path_problem *)
-          ( Edges.fold
-              (fun acc edge ->
-                 if Marker.equal Marker.beginning edge.right then
-                   raise @@ Failure "edge has marker  < BEGINNING";
-                 if Marker.equal Marker.ending edge.left then
-                   raise @@ Failure "edge has ENDING < marker";
-                 if List.mem_assoc edge.right acc then
-                   List.map (fun (x,y) ->
-                       if Marker.equal x edge.right
-                       then x,(edge.author, edge.left)::y
-                       else (x,y)
-                            )acc
-                 else
-                   (edge.right, [(edge.author, edge.left)])::acc)
-              [] original_edges) @ [Marker.beginning, []]
-        in
-        let incoming_map =
-          group_by_marker incoming_map
-        in
-        let () = (* sanity check *)
-          List.fold_left (fun seen (marker, parents) ->
-              (* no self-referential elements *)
-              assert(not (List.exists (fun (_author, parent) ->
-                  Marker.equal marker parent
-                ) parents)) ;
-              (* no double entries: *)
-              assert(not (List.mem marker seen));
-              marker::seen
-            )
-            [] incoming_map ;()
-        in
-        let sep = Fmt.unit "," in
-        Logs.debug (fun m -> m "outgoing graph: @[<v>%a@]"
-                       Fmt.(list ~sep:(unit "|@,")
-                            @@ pair ~sep:(unit": ") Marker.pp
-                              (list ~sep:(unit"; ")
-                               @@ pair ~sep
-                                 (brackets int32) Marker.pp )) incoming_map) ;
-        Logs.debug (fun m -> m "incoming graph: @[<v>%a@]"
-                       Fmt.(list ~sep:(unit "|@,")
-                            @@ pair ~sep:(unit": ") Marker.pp
-                              (list ~sep:(unit"; ")
-                               @@ pair ~sep
-                                 (brackets int32) Marker.pp )) incoming_map) ;
-        let counted = List.map (fun (x,y) ->
-            x, List.length
-              (List.filter (fun (_,m) -> not @@ Marker.equal Marker.ending m) y)
-          ) incoming_map in
-
         (* Ensure we have nothing before BEGINNING: *)
         let () = assert(List.assoc Marker.beginning counted = 0) in
         (* Ensure we have at least one thing pointing to ENDING: *)
@@ -319,248 +439,24 @@ module CRDT(E: CRDT_element) = struct
 
         Logs.debug (fun m ->
             m "counted vertices: @[<v>%a@]"
-              Fmt.(list ~sep:(unit "@,")@@ pair ~sep Marker.pp int) counted) ;
-        let max_target_length = pred @@ List.length incoming_map in
-        let rec recurse visited (siblings:(author_id * Marker.t) list)
-          : author_id * Marker.t list * int =
-          let marker_comma_element marker_lst = List.map (fun key ->
-              key,try Some (Markers.find key elements)
-              with _ -> None) marker_lst in
-          let pp_markers_and_elements =
-            Fmt.(list ~sep @@ pair ~sep:(unit":")
-                   Marker.pp @@ option pp_element) in
-          List.fold_left (fun (last_auth,acc, acc_count) (author, marker) ->
-              assert(not (List.length acc > max_target_length)) ;
-              if true && (* Turning this off makes update_vector fail*)
-                 List.length acc = max_target_length
-                 && (List.rev acc |> List.hd |> Marker.equal Marker.beginning)
-              then begin
-                let acc_count =
-                  if (List.rev acc |> List.hd |> Marker.equal Marker.beginning)
-                  then acc_count
-                  else -10 (* decidedly not the solution *)
-                in
-                (* solution found: *)
-                Logs.warn (fun m -> m "Skipping marker %a:%a, solution FOUND"
-                              Fmt.int32 author Marker.pp marker);
-                (last_auth,acc,acc_count)
-              end else begin
-                assert(not @@ Markers.mem marker visited);
-                begin
-                  let visited = Markers.add marker true visited in
-                  let points_to_me = List.assoc marker incoming_map in
-                  let (_auth, child_path, child_counts) =
-                    recurse visited @@ List.filter (fun (_,m) ->
-                        (*not @@Marker.(equal beginning) m*) true) points_to_me in
-                  Logs.debug (fun m ->
-                      m "marker %a children: %d path: %a"
-                        pp_markers_and_elements (marker_comma_element [marker])
-                        child_counts
-                        pp_markers_and_elements
-                        (marker_comma_element child_path) );
-                  let actual_siblings : Markers.key list =
-                    let siblings = siblings in
-                    Logs.debug (fun m -> m "siblings before sort: %a"
-                                   pp_markers_and_elements
-                                   (marker_comma_element @@ List.map (fun (_,v)->v)siblings)
-                               );
-                    List.filter (fun (sib_author,sibmark) ->
-                        not (List.exists (Marker.equal sibmark) child_path)
-                        && not (List.mem (author,marker) @@ List.assoc sibmark incoming_map)
-                        && not (List.mem (sib_author,sibmark) @@ List.assoc marker incoming_map)
-                      ) siblings
-                    |> List.sort (*sort ascending according to author: *)
-                      (fun (aaa,a_m) (bbb,b_m) ->
-                         if Int32.equal aaa bbb then Marker.compare a_m b_m
-                         else Int32.compare aaa bbb)
-                    |> List.fold_left
-                      (fun acc ((_auth,marker) as elem) ->
-                         match acc with
-                         (* ignore same element with higher author id:*)
-                         | (_, hd)::_ when Marker.equal marker hd -> acc
-                         | acc -> elem::acc ) []
-                    |> List.sort (*sort decending according to author: *)
-                      (fun (aaa,a_m) (bbb,b_m) ->
-                         begin match
-                             Marker.equal a_m Marker.beginning,
-                             Marker.equal b_m Marker.beginning with
-                         | true, false -> -1 (* beginning sorts first*)
-                         | false, true ->  1 (* beginning sorts first *)
-                         | false, false when Int32.equal aaa bbb ->
-                           compare (List.assoc a_m counted)
-                             (List.assoc b_m counted)
-                         | false, false -> Int32.compare bbb aaa
-                         | true, true -> assert false (*TODO*)
-                         end)
-                    |> fun x ->
-                    Logs.debug (fun m -> m "SORTED SIBS: %a"
-                                   Fmt.(list ~sep:(unit"; ")@@
-                                        pair ~sep:(unit":") int32
-                                          pp_markers_and_elements
-                                       )
-                                   (List.map (fun (a,m) ->
-                                        a, marker_comma_element [m]
-                                      )x));
-                    x|> List.split |> snd
-                  in
-                  let this_total =
-                    List.assoc marker counted +
-                    List.length actual_siblings + child_counts in
-                  Logs.debug (fun m -> m "this_total: %d acc_count: %d"
-                                 this_total acc_count) ;
-                  begin if
-                    (acc_count = max_target_length && not (List.mem (last_auth,List.hd acc)@@ List.assoc Marker.ending incoming_map))
-                    ||
-                    (* if acc has BEGINNING and is not max_target_len then discard it:*)
-                    this_total > acc_count
-                    (*
-                    (1+List.length child_path > List.length acc
-                     || (1+List.length child_path = List.length acc
-                         && author < last_auth))*)
-                    (*this_total > acc_count*)
-                    (*|| (this_total = acc_count && author < last_auth)*)
-                    then begin
-                      Logs.debug (fun m ->
-                          m "child_path: %a -- Actual siblings for %a : [%a] \
-                             - out of [%a]"
-                            pp_markers_and_elements
-                            (marker_comma_element child_path)
-                            pp_markers_and_elements
-                            (marker_comma_element [marker])
-                            pp_markers_and_elements
-                            (marker_comma_element actual_siblings)
-                            Fmt.(list ~sep @@ pair ~sep:(unit":")
-                                   int32 Marker.pp) siblings );
-                      let acc_after_insertion =
-                        let rec insert_after ~tgt ~lst acc = function
-                          | [] ->
-                            Logs.err (fun m ->
-                                m "GOT EMPTY INSERTAFTER tgt:[%a] \
-                                   lst:[%a] acc:[%a]"
-                                  pp_markers_and_elements
-                                  (marker_comma_element [tgt])
-                                  pp_markers_and_elements
-                                  (marker_comma_element lst)
-                                  pp_markers_and_elements
-                                  (marker_comma_element acc)
-                              );
-                            acc @ lst
-                          | hd::tl when Marker.equal hd tgt ->
-                            Logs.debug (fun m ->
-                                m "insert_after: tgt:%a lst:[%a] tl:[%a] acc: [%a]"
-                                  pp_markers_and_elements
-                                  (marker_comma_element [tgt])
-                                  pp_markers_and_elements
-                                  (marker_comma_element lst)
-                                  pp_markers_and_elements
-                                  (marker_comma_element tl)
-                                  pp_markers_and_elements
-                                  (marker_comma_element acc)
-                              );
-                            List.rev acc @ tgt :: tl @  lst
-                          | hd::tl -> insert_after ~tgt ~lst (hd::acc) tl
-                        in
-                        if true && not (List.exists (Marker.equal marker) child_path)
-                        then
-                          insert_after
-                            ~tgt:marker ~lst:child_path [] actual_siblings
-                        else begin
-                          Logs.debug (fun m ->
-                              m "skipping insert because %a is in [%a]@@[%a]"
-                                pp_markers_and_elements (marker_comma_element [marker])
-                                pp_markers_and_elements
-                                (marker_comma_element actual_siblings)
-                                pp_markers_and_elements
-                                (marker_comma_element child_path)
-                            );
-                          (actual_siblings)@child_path
-                        end
-                      in
-                      Logs.debug (fun m -> m "sorted after insert: %a"
-                                     pp_markers_and_elements
-                                     (marker_comma_element acc_after_insertion)) ;
-                      if List.exists
-                          (Marker.equal Marker.beginning)
-                          acc_after_insertion then
-                        begin
-                          Logs.warn (fun m -> m "Got BEGINNING, hd: %B, acc len\
-                                                 : %d, max: %d score: %d"
-                                        (List.hd (List.rev acc_after_insertion)
-                                         |> Marker.equal Marker.beginning)
-                                        (List.length acc_after_insertion)
-                                        max_target_length
-                                        this_total
-                                    )
-                        end;
-                      (author, (acc_after_insertion), this_total)
-                    end else begin
-                      Logs.debug (fun m -> m "rejecting @[<v>(%ld)%a \
-                                              score:%d \
-                                              < @,(%ld)%a score:%d@]"
-                                     author
-                                     Fmt.(list ~sep @@ pair ~sep:(unit":")
-                                            Marker.pp @@ option pp_element)
-                                     (List.map (fun key ->
-                                          key,try Some (Markers.find key elements)
-                                          with _ -> None) (marker::child_path))
-                                     this_total
-                                     last_auth
-                                     Fmt.(list ~sep @@ pair ~sep:(unit":")
-                                            Marker.pp @@ option pp_element)
-                                     (List.map (fun key ->
-                                          key,try Some (Markers.find key elements)
-                                          with _ -> None) acc) acc_count );
-                      (last_auth,acc,acc_count)
-                    end
-                  end
-                end
-              end
-            ) (Int32.max_int, [], ~-1)
-            (let rejected, siblings =
-               (List.partition (fun (_,m) -> Markers.mem m visited)siblings)
-             in
-             if [] <> rejected then
-             Logs.warn (fun m -> m "rejecting already visited siblings: %a"
-                            Fmt.(list ~sep:(unit", ") (pair ~sep:(unit":")
-                                                         int32 Marker.pp))
-                            rejected);
-             (List.sort (fun (a,_) (b,_) -> Int32.compare b a)siblings)
-          )
-        in
-        recurse Markers.empty (List.assoc Marker.ending incoming_map)
-        |> fun (_,dag,_) -> List.rev dag
-      in
-      let sorted_dag = longest_dag in
-      Logs.debug (fun m -> m "Longest dag: %a"
-                     Fmt.(list ~sep:(unit";") @@ Marker.pp)
-                     sorted_dag
-                 );
-
-      let markers = sorted_dag
-                    |> List.filter (fun a -> a <> Marker.beginning
-                                             && a <> Marker.ending) in
-      let m_elements =
-        List.filter (fun x ->
-            not @@ Marker.(equal x beginning)
-            || Marker.(equal x ending)) markers
-        |> List.map (fun m -> Markers.find m elements)
-      in
-      Logs.debug (fun m -> m "markers: %a"
-                     Fmt.(list ~sep:(unit";")pp_element) m_elements);
-      let produced =
-        List.fold_left (fun vec marker ->
+              Fmt.(list ~sep:(unit "@,")@@ pair ~sep pp_marker int) counted) ;
+      *)
+      let produced : snapshot =
+        Pvec.fold_left (fun vec marker ->
             if not Marker.(equal marker beginning || equal marker ending) then
-              Pvec.add_last vec (marker,(Markers.find marker elements))
+              Pvec.add_last vec ((Markers.find marker authors, marker),
+                                 Markers.find marker elements)
             else vec)
           Pvec.empty markers in
       Logs.debug (fun m -> m "of_t: %a" pp produced);
       produced
 
-    let extend_with_vector
+    let extend_with_vector ~(author:author_id)
         (current_snapshot:snapshot) (original_vector:E.t Pvec.t) : snapshot =
-      let pp_pair = Fmt.(pair ~sep:(unit ":") Marker.pp pp_element) in
+      let pp_pair = Fmt.(pair ~sep:(unit ":")
+                           (pair ~sep:comma int32 Marker.pp) pp_element) in
       let make_live element =
-        let mark = Marker.generate (), Live element in
+        let mark = (author, Marker.generate ()), Live element in
         Logs.debug (fun m ->
             m "Creating marker (%a)" pp_pair mark);
         mark
@@ -624,8 +520,8 @@ module CRDT(E: CRDT_element) = struct
               end
           end
         )
-        (Pvec.empty, original_vector) current_snapshot
-      |> fun (produced, tl) ->
+        (Pvec.empty, original_vector) (current_snapshot:snapshot)
+      |> fun ((produced:snapshot), tl) ->
       Logs.debug (fun m -> m "produced: @[<v>%d [%a]@ \
                               tl: %d: [%a]@]"
                      (Pvec.length produced) pp produced
@@ -637,7 +533,8 @@ module CRDT(E: CRDT_element) = struct
     let old_snapshot = Snapshot.of_t t in
     Logs.debug (fun m -> m "update_with_vector: old_snapshot: %a"
                    Snapshot.pp old_snapshot);
-    let next_snapshot = Snapshot.extend_with_vector old_snapshot vector in
+    let next_snapshot =
+      Snapshot.extend_with_vector ~author old_snapshot vector in
     Logs.debug (fun m -> m "update_with_vector: next_snapshot: %a"
                    Snapshot.pp next_snapshot);
     let next_elements =
@@ -668,7 +565,7 @@ module CRDT(E: CRDT_element) = struct
         t.elements new_elements
     in
     Logs.debug (fun m -> m "next_snapshot: %a" Snapshot.pp next_snapshot);
-    let edges_of_next_snapshot = Snapshot.to_edges author next_snapshot in
+    let edges_of_next_snapshot = Snapshot.to_edges next_snapshot in
     Logs.debug (fun m -> m "  ^-- edges: %a" Edges.pp edges_of_next_snapshot);
     let next_edges =
       let clean_edges next_edges old_edges =
@@ -687,16 +584,25 @@ module CRDT(E: CRDT_element) = struct
       Edges.union next_edges (clean_edges t.edges next_edges)
     in
     let produced =
-      { elements = next_elements ; edges = next_edges ; edits = Edits.empty } in
+      let authors = (* TODO here we claim we wrote everything that isn't
+                         already claimed, maybe not the greatest approach: *)
+        Markers.merge (fun key _ -> function
+            | None -> Some author
+            | Some _ -> Some (Markers.find key t.authors)
+          ) next_elements t.authors
+      in
+      { elements = next_elements ; edges = next_edges ; edits = Edits.empty
+      ; authors } in
     Logs.debug (fun m -> m "Produced: %a" pp produced); produced
 
-  let insert_element t ~author ~(after:Marker.t) marker element =
+  let insert_element t ~author ~(after:Marker.t) ~before marker element =
     merge t
       { empty with
         elements = Markers.singleton marker (Live element) ;
         edges = Edges.(
             insert    {left=after ; right=marker       ; author} empty
-            |> insert {left=marker; right=Marker.ending; author} ) }
+            |> insert {left=marker; right=before; author} )
+        ; authors = Markers.add marker author t.authors }
 
 end
 

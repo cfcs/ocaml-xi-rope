@@ -64,14 +64,22 @@ module CRDT(E: CRDT_element) :
 
       val pp : Format.formatter -> t -> unit
       val equal : t -> t -> bool
-      (** We expose equality, but since lt/gt comparisons are expensive,
-          we hide those.*)
+      (** We expose equality, but since lt/gt comparisons are expensive
+          due to the topological ordering, we hide those.*)
 
       val of_int64 : int64 -> t
       (** [of_int64 num] is a marker represented by [num].
           [num] should be random, and is not validated against
           existing [t]'s in the set.
-          You should generally use {!generate} instead.*)
+          You should generally use {!generate} instead, this function is here
+          to enable deserialization.*)
+
+      val to_int64 : t -> int64
+      (** [to_int64 t] is the inverse of {of_int64}.
+          NB: Since markers are sorted topologically according to the edges
+              in the graph, comparisons on [to_int64 t] are generally
+              meaningless. This function is here to enable serialization only.
+      *)
 
     end
 
@@ -86,8 +94,8 @@ module CRDT(E: CRDT_element) :
     val merge : t -> t -> t
     (** [merge t1 t2] is the applied union of [t1] and [t2].*)
 
-    val insert_element : t -> author:author_id -> after:Marker.t ->
-      Marker.t -> E.t -> t
+    val insert_element : t -> author:author_id ->
+      after:Marker.t -> before:Marker.t -> Marker.t -> E.t -> t
     (** [append_element t author insertpoint new_marker new_element] is
         [{!merge} t ({!singleton} author new_marker new_element)] with the
         singleton being inserted into [t] immediately after [insertpoint].
@@ -98,7 +106,8 @@ module CRDT(E: CRDT_element) :
         [marker] marked as a {!element.Tombstone}.*)
 
     module Snapshot : sig
-      type snapshot = (Marker.t * element) Pvec.t (* TODO make private*)
+      type snapshot = ((author_id * Marker.t) * element) Pvec.t
+      (* TODO make private *)
 
       val live_elements : snapshot -> (Marker.t * elt) Pvec.t
       (** [live_elements snapshot] is a new {!Pvec.t} vector
@@ -113,12 +122,15 @@ module CRDT(E: CRDT_element) :
           {!Marker.equal} and {!E.equal}, and have the
           same {!element.Live}/{!element.Tombstone} status.*)
 
-      val to_vector : snapshot -> E.t Pvec.t
+      val to_vector : snapshot -> (author_id * E.t) Pvec.t
       (** [to_vector snap] is a {!Pvec.t} with [snap]'s {b live} elements.*)
 
-      val extend_with_vector : snapshot -> E.t Pvec.t -> snapshot
-      (** [extend_with_vector snap vector] is [snap] merged with [vector],
-          with [vector]'s elements all being marked as {!element.Live},
+      val extend_with_vector : author:author_id -> snapshot -> E.t Pvec.t ->
+        snapshot
+      (** [extend_with_vector ~author snap vector] is [snap] merged with
+          [vector],
+          with [vector]'s elements all being marked as {!element.Live} and
+          as authored by [author],
           and with elements from [snap] that {b are not} present in [vector]
           marked as {!element.Tombstone}'d.
           Where possible, the markers from [snap] are reused to produce the

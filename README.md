@@ -50,9 +50,15 @@ As such, this is not *production-ready:*
 
 # Installing the dependencies
 
+Library:
 ```
 opam pin add -ny pvec https://github.com/dbuenzli/pvec.git
 opam install alcotest fmt logs pvec qcheck rresult uchar
+```
+
+Test / demo utils:
+```
+opam install notty
 ```
 
 # Further reading
