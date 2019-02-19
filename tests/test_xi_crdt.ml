@@ -97,6 +97,15 @@ let test_singleton_append () : unit =
   Alcotest.(check a_snapshot) "append is equivalent to merging with"
     snap_without_append snap_with_append_same
 
+let test_singleton_diff () : unit =
+  let a = C.singleton 3l (m 10L) 'a' in
+  let b = C.singleton 1l (m 20L) 'b' in
+  let ab = C.merge a b in
+  let ab_diff_b = C.diff ab b in
+  let ab_diff_b_merge_a = C.merge a ab_diff_b in
+  Alcotest.(check a_snapshot) "a+b diff b = a"
+    (C.Snapshot.of_t a) (C.Snapshot.of_t ab_diff_b_merge_a)
+
 let strip_author = Pvec.map (fun (_a,e) -> e)
 let add_author author = Pvec.map (fun e -> (author, e))
 
@@ -415,6 +424,7 @@ elements that different from the vector.
 let tests : unit Alcotest.test_case list = [
   "singleton merge", `Quick, test_singleton_merge ;
   "singleton append", `Quick, test_singleton_append ;
+  "singleton diff", `Quick, test_singleton_diff ;
   "update_with_vector", `Quick, test_update_with_vector ;
   "quickcheck singleton merges", `Slow, test_singleton_qc_merge ;
   "quickcheck update_with_vector", `Slow, test_qc_update_with_vector ;

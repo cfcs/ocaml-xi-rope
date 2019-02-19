@@ -11,11 +11,21 @@ module Term = Notty_lwt.Term
 
 module C = Xi_crdt.UcharCRDT
 
-let author = Random.self_init () ; Random.int32 640l
+let author = Random.self_init () ; Random.int32 999l
 let counter = ref 0
 let document = ref C.empty
 let cursor = ref (0,0)
 let debug = ref Pvec.empty
+
+type edit =
+  { author: C.author_id ;
+    element: C.elt ;
+    alive: bool;
+    before: C.Marker.t ;
+    after: C.Marker.t ;
+    marker: C.Marker.t ;
+  }
+let write_mvar : edit Lwt_mvar.t = Lwt_mvar.create_empty ()
 
 let merge_edge ~author ~after ~before marker element =
   document := C.insert_element !document ~author ~after ~before marker element ;
@@ -35,6 +45,7 @@ let insert_uchars ?(author=author) ?(first=fst !cursor) chars =
                                      Fmt.(pair ~sep:comma int32 C.pp_elt)) vec
                              C.pp old_document C.pp !document
                           ) !debug ;
+  (* debug: *)
   let actual_vec = C.Snapshot.(of_t !document |> to_vector) in
   if Pvec.to_list vec <> Pvec.to_list actual_vec then
     debug := Pvec.add_first ("shit!!!") !debug
@@ -94,15 +105,6 @@ let rec increase_counter () =
     else counter := 0
   ) >>= increase_counter
 
-type edit =
-  { author: C.author_id ;
-    element: C.elt ;
-    alive: bool;
-    before: C.Marker.t ;
-    after: C.Marker.t ;
-    marker: C.Marker.t ;
-  }
-
 let initialize_socket ~write_mvar ~read_mvar : unit Lwt.t =
   begin Lwt.try_bind (fun () -> Lwt_unix.mkfifo "./demo.fifo" 0o600)
       (fun a -> Lwt.return a)
@@ -137,6 +139,12 @@ let initialize_socket ~write_mvar ~read_mvar : unit Lwt.t =
 
 let pvec_line_wrap
     ?(offset=0) ~height ~width (orig_vec:string Pvec.t) =
+  (* need two predicates:
+     weight : elt -> int
+     is_break : elt -> bool
+     weight is the amount of printable characters
+     invisible determines if the elt will end up in the output
+  *)
   (* let handle_lines ?take ~drop vec =
     let rec scan ?(f_line:(int -> int -> elt Pvec.t -> unit)option)
         ~start = function
@@ -361,13 +369,12 @@ let handle_remote_input mvar =
   in loop ()
 
 let main () =
-  let read_mvar = Lwt_mvar.create_empty ()
-  and write_mvar = Lwt_mvar.create_empty () in
+  let read_mvar = Lwt_mvar.create_empty () in
   Lwt.choose [
     initialize_socket ~read_mvar ~write_mvar ;
     increase_counter ();
     handle_remote_input read_mvar ;
-    interface ();
+    interface () ;
   ]
 
 let () = Lwt_main.run (main ())

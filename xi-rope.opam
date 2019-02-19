@@ -1,7 +1,7 @@
-opam-version: "1.2"
+opam-version: "2.0"
 name:         "xi-rope"
 homepage:     "https://github.com/cfcs/ocaml-xi-rope"
-dev-repo:     "https://github.com/cfcs/ocaml-xi-rope.git"
+dev-repo:     "git+https://github.com/cfcs/ocaml-xi-rope.git"
 bug-reports:  "https://github.com/cfcs/ocaml-xi-rope/issues"
 doc:          "https://cfcs.github.io/ocaml-xi-rope/doc"
 author:       ["cfcs"]
@@ -10,10 +10,8 @@ license:      "AGPL"
 
 build: [
   ["ocaml" "pkg/pkg.ml" "build" "--pinned" "%{pinned}%"]
-]
-build-test: [
-  ["ocaml" "pkg/pkg.ml" "build" "--pinned" "%{pinned}%" "--tests" "true"]
-  ["ocaml" "pkg/pkg.ml" "test"]
+  ["ocaml" "pkg/pkg.ml" "build" "--pinned" "%{pinned}%" "--tests" "true"] {with-test}
+  ["ocaml" "pkg/pkg.ml" "test"] {with-test}
 ]
 
 depends: [
@@ -23,13 +21,12 @@ depends: [
 
   "odoc" {doc}
 
-  "fmt"
-  "logs"
+  "fmt"      { >= "0.8.5"  &  < "0.9.0" }
+  "logs"     { >= "0.6.2"  &  < "0.7.0" }
   "pvec"
-  "uchar" # for ocaml 4.02 compat
-  "rresult"
+  "rresult"  { >= "0.6.0"  &  < "0.7.0" }
 
   "qcheck" {test}
   "alcotest" {test}
 ]
-available: [ ocaml-version >= "4.03.0" ]
+available: [ ocaml >= "4.04.0" ]

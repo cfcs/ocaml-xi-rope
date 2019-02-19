@@ -62,6 +62,15 @@ module CRDT(E: CRDT_element) = struct
   module Markers = struct
     (* Map of markers -> element *)
     include Map.Make(Marker)
+    let diff (type x) (t1:x t) (t2:x t) : x t =
+      merge (fun _key -> function
+          (* exists solely in t2: *)
+          | None -> begin fun b -> b end
+          | Some a -> begin function
+              | None -> None
+              | Some b -> if a = b then None else Some b
+            end
+        ) t1 t2
     let pp fmt t =
       iter (fun marker -> fun element ->
           Fmt.pf fmt "(%a:%a)" Marker.pp marker pp_element element
@@ -106,6 +115,7 @@ module CRDT(E: CRDT_element) = struct
     val equal : t -> t -> bool
     val remove : edge -> t -> t
     val is_empty : t -> bool
+    val diff : t -> t -> t
   end
   = struct
     include Set.Make(EdgeOrder)
@@ -204,6 +214,13 @@ module CRDT(E: CRDT_element) = struct
                                 then Some a
                                 else failwith "TODO marker id conflict")
           t1.authors t2.authors ;
+    }
+
+  let diff t1 t2 =
+    { elements = Markers.diff t1.elements t2.elements ;
+      edges = Edges.diff t1.edges t2.edges ;
+      edits = Edits.diff t1.edits t2.edits ;
+      authors = Markers.diff t1.authors t2.authors;
     }
 
   module Snapshot = struct

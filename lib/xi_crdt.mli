@@ -94,6 +94,14 @@ module CRDT(E: CRDT_element) :
     val merge : t -> t -> t
     (** [merge t1 t2] is the applied union of [t1] and [t2].*)
 
+    val diff : t -> t -> t
+    (** [diff t1 t2] is [t3] for which [merge t1 t3 = t2].
+        Note that the inverse is not true, ie [merge t2 t3 <> t1].
+        TODO Note that a diff contains only the required updates,
+             and as thus ie obtaining a {Snapshot.t} is not possible.
+        TODO This is currently not represented in the type system.
+    *)
+
     val insert_element : t -> author:author_id ->
       after:Marker.t -> before:Marker.t -> Marker.t -> E.t -> t
     (** [append_element t author insertpoint new_marker new_element] is
