@@ -99,7 +99,7 @@ module CRDT(E: CRDT_element) :
         Note that the inverse is not true, ie [merge t2 t3 <> t1].
         TODO Note that a diff contains only the required updates,
              and as thus ie obtaining a {Snapshot.t} is not possible.
-        TODO This is currently not represented in the type system.
+        TODO ^ This invariant is currently not represented in the type system.
     *)
 
     val insert_element : t -> author:author_id ->

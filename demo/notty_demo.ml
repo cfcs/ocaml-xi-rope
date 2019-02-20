@@ -39,6 +39,15 @@ let insert_uchars ?(author=author) ?(first=fst !cursor) chars =
       ~into:old_vec chars in
   let old_document = !document in
   document := C.update_with_vector author !document (strip_author vec) ;
+  let diff = C.diff old_document !document in
+  let _ =
+    let edit = {
+      author ;
+      element ;
+      alive ;
+      before; after; marker;
+    } in ()
+  in
   debug := Pvec.add_first (Fmt.strf "update_with_vector:\
                                      @[<v> %a@,old: %a@,new: %a@]"
                              Pvec.(pp ~sep:Fmt.(unit" -> ")

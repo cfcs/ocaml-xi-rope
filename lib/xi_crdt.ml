@@ -38,6 +38,8 @@ module CRDT(E: CRDT_element) = struct
       in skip beginning
   end
 
+  module MarkerSet = Set.Make(Marker)
+
   let pp_elt = E.pp
 
   type element =
@@ -76,8 +78,6 @@ module CRDT(E: CRDT_element) = struct
           Fmt.pf fmt "(%a:%a)" Marker.pp marker pp_element element
         ) t
   end
-
-  module MarkerSet = Set.Make(Marker)
 
   type edge =
     { left: Marker.t ;
@@ -131,6 +131,8 @@ module CRDT(E: CRDT_element) = struct
     { undo_group_id : unit ; (* TODO *)
       deleted : element Markers.t ;
       inserted : element Markers.t ;
+      edges : Edges.t;
+      author : author_id;
     }
 
   let pp_edit fmt { deleted ; inserted; _ }=
@@ -141,6 +143,8 @@ module CRDT(E: CRDT_element) = struct
     { undo_group_id = () ;
       deleted = Markers.empty ;
       inserted = Markers.empty ;
+      edges = Edges.empty ;
+      author = 0l; (* TODO *)
     }
 
   module Edits = struct include Set.Make(struct
@@ -319,7 +323,8 @@ else
     return L   (a topologically sorted order)
 *)
 
-      let rec for_each_node_m ~n ~(m:Marker.t) edges _S incoming_of_node outgoing_of_node =
+      let rec for_each_node_m ~n ~(m:Marker.t) edges _S
+          incoming_of_node outgoing_of_node =
         (* remove edge e from the graph *)
         let edges = Edges.filter (fun e -> e.left = n && e.right = m) edges in
         let incoming_of_node =
@@ -346,24 +351,23 @@ else
         end
       and while_s_nonempty edges _S _L incoming_of_node outgoing_of_node =
 
-        (* TODO instead of "choose" I think this is where we want to
-           handle ties?*)
-        let n = MarkerSet.fold (fun this old ->
-            Logs.debug (fun m -> m "authorhit %a old:%a"
-                           Marker.pp this Marker.pp old);
+        (* instead of "choosing" an arbitrary {m} we pick the one with lowest
+           author_id in order to guarantee consistent/convergent ordering: *)
+        let n = MarkerSet.fold (fun this (old, old_author) ->
             let which =
-            if 1 > Int32.compare
-                 (Markers.find this authors)
-                 (Markers.find old authors) (* TODO *)
-                 (*(try Markers.find this authors with Not_found -> -1l )
-                   (try Markers.find old authors with Not_found -> -1l )*)
-            then this else old
-            in Logs.debug(fun m ->m"which:%a (%ld < %ld)"
-                             Marker.pp which
+              let this_author = Markers.find this authors in
+              if 1 > Int32.compare this_author old_author
+              then this, this_author else old, old_author
+            in (*Logs.debug(fun m ->m"which:%a (%ld < %ld)"
+                             Fmt.(pair Marker.pp int32) which
                              (Markers.find this authors)
                              (Markers.find old authors)
-                         );
-            which ) _S (MarkerSet.choose _S)in
+                         ); *)
+            which ) _S (let marker = MarkerSet.choose _S in
+                        marker, Markers.find marker authors
+                       )
+              |> fst
+        in
         (* remove a node n from S: *)
         let _S = MarkerSet.remove n _S in
         (* add n to tail of L: *)
@@ -414,28 +418,6 @@ else
       else Error (`Msg "edges is not empty at start")
 
     let of_t {edges = original_edges ; elements ; authors ; _ } : snapshot =
-      (*
-      let _TODO_debug =
-        let pp_marker fmt v = Fmt.pf fmt "%ld~%a:%a"
-            (try Markers.find v authors with Not_found -> -1l)
-            Marker.pp v
-            Fmt.(option pp_element)
-            (try Some (Markers.find v elements) with _ -> None) in
-        let pp_graph desc (graph:MarkerSet.t Markers.t) =
-          Logs.debug (fun m -> m "%s: @[<v>%a@]" desc
-                         Fmt.(list ~sep:(unit "@,")
-                              @@ parens @@ pair ~sep:(unit": ") pp_marker
-                                (list ~sep:(unit"; ")
-                                 @@  pp_marker ))
-                         (Markers.bindings graph
-                          |>
-                          List.map (fun (k,v) -> k, MarkerSet.elements v))
-                     )
-        in
-        let in_TODO, out_TODO = incoming_outgoing_multimap original_edges in
-        pp_graph "incoming map" in_TODO;
-        pp_graph "outgoing map" out_TODO
-      in*)
       let kahns_stuff () =
         match kahns original_edges authors with
         | Error `Msg x ->
