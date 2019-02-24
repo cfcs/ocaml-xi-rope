@@ -41,12 +41,12 @@ let insert_uchars ?(author=author) ?(first=fst !cursor) chars =
   document := C.update_with_vector author !document (strip_author vec) ;
   let diff = C.diff old_document !document in
   let _ =
-    let edit = {
+    (*let edit = {
       author ;
       element ;
       alive ;
       before; after; marker;
-    } in ()
+      } in ()*) ()
   in
   debug := Pvec.add_first (Fmt.strf "update_with_vector:\
                                      @[<v> %a@,old: %a@,new: %a@]"
@@ -232,6 +232,128 @@ let pvec_line_wrap
   (*let chunked_vec = handle_lines ?f_line ~drop:offset ~take:height orig_vec in*)
   (* ^-- notty doesn't like \n *)
   chunked_vec
+
+module Linevec = struct
+  module IntSet = Set.Make(struct type t = int let compare = compare end)
+  type 'a t = {
+    elements: ('a * Uchar.t) Pvec.t ;
+    hardbreak_vec: int Pvec.t ;
+    hardbreaks: IntSet.t ; (* only changes when elements are changed *)
+    softbreaks: IntSet.t ; (* changes per view, when width is changed,
+                              or when elements are changed *)
+  }
+  let empty = { elements = Pvec.empty ; hardbreak_vec = Pvec.empty;
+                hardbreaks = IntSet.empty ; softbreaks = IntSet.empty }
+  let of_uchar_vec ?(softbreak_width=80) uchvec =
+    Pvec.foldi_left
+      (fun (softbreak_counter,t) idx ((_, uch) as elt) ->
+         (* TODO substitute unhandled chars or implement the unicode standard
+            for linewrapping:
+            http://unicode.org/reports/tr14/  *)
+         let hardbreak_vec, hardbreaks, (softbreaks, last_softbreak) =
+           if uch <> Uchar.of_char '\n' then
+             t.hardbreak_vec, t.hardbreaks,
+             begin if idx < softbreak_width then
+                 t.softbreaks, succ softbreak_counter
+               else
+                 IntSet.add idx t.softbreaks, 0
+             end
+           else
+             Pvec.add_last t.hardbreak_vec idx , IntSet.add idx t.hardbreaks,
+             (t.softbreaks, 0)
+         in
+         last_softbreak, { elements = Pvec.add_last t.elements elt ;
+                           hardbreak_vec ; hardbreaks ; softbreaks }
+      ) (0, empty) uchvec
+
+  let drop_horizontal_predicate ~f offset orig_t =
+    if offset = 0 then orig_t
+    else
+      Pvec.foldi_left
+        (fun (line_offset, t) orig_idx elt ->
+           let elt_offset = Pvec.length t.elements in
+           if IntSet.mem orig_idx orig_t.hardbreaks then begin
+             0, { elements = Pvec.add_last t.elements elt ;
+                  hardbreaks = IntSet.add elt_offset t.hardbreaks;
+                  hardbreak_vec = Pvec.add_last t.hardbreak_vec elt_offset ;
+                  softbreaks = orig_t.softbreaks
+                }
+           end else
+             (* it is printable: *)
+             if f line_offset offset then (* need to skip this: *)
+               succ line_offset, t
+             else (* need to insert this: *)
+               succ line_offset, { elements = Pvec.add_last t.elements elt ;
+                                   hardbreaks = t.hardbreaks ;
+                                   hardbreak_vec = t.hardbreak_vec ;
+                                   softbreaks = t.softbreaks;
+                                 }
+        ) (0, empty) orig_t.elements |> snd
+
+  let drop_horizontal_left =
+    drop_horizontal_predicate ~f:(<)
+
+  let drop_horizontal_after offset t =
+    if offset = 0 then
+      let len = IntSet.cardinal t.hardbreaks in
+      { elements = Pvec.filter(fun (_,uch) ->Uchar.of_char '\n'=uch) t.elements;
+        hardbreaks = IntSet.of_list (List.init len (fun i -> i)) ;
+        hardbreak_vec = Pvec.init ~len (fun i -> i) ;
+        softbreaks = t.softbreaks;
+      }
+    else
+      drop_horizontal_predicate ~f:(>=) offset t
+
+  let take_hardbreaks ?(offset=0) n (t:'a t) =
+    if n = 0 || IntSet.cardinal t.hardbreaks < offset then empty
+    else
+    let return_nothing, first =
+      if offset = 0 then false, 0 else
+        match Pvec.get t.hardbreak_vec (pred offset) with
+        | exception Invalid_argument _ when Pvec.length t.hardbreak_vec = 0 ->
+          true, 0
+        | exception (Not_found | Invalid_argument _)-> false, 0
+        | idx -> false, succ idx in
+    if return_nothing then empty
+    else
+    let last = match Pvec.get t.hardbreak_vec (offset+pred n) with
+      | exception (Not_found | Invalid_argument _) ->
+        max (pred @@ Pvec.length t.elements) 0
+      | idx -> idx in
+    { elements = Pvec.range ~first ~last t.elements ;
+      hardbreak_vec = Pvec.filter
+          (fun break -> first <= break && break <= last) t.hardbreak_vec
+                      |> Pvec.map (fun old_offset -> old_offset - first) ;
+      hardbreaks = begin match IntSet.split first t.hardbreaks with
+        | (_ , true , right) -> IntSet.add first right
+        | (_, false, right) -> right
+      end |> IntSet.split last |> begin function
+          | (in_range, false, _) -> in_range
+          | (in_range, true, _) -> IntSet.add last in_range
+        end |> IntSet.map (fun old_offset -> max 0 @@ old_offset - first) ;
+      softbreaks = IntSet.map (fun old -> old - first) t.softbreaks
+                   |> IntSet.filter (fun i -> i >= 0);
+    }
+
+  let softbreak_width ~initial ~width vec =
+    if Pvec.length vec < width then
+      IntSet.empty
+    else
+      let rec loop acc = function
+        | 0 -> acc
+        | n -> loop (IntSet.add (initial+n) acc) (n-width)
+      in loop IntSet.empty (Pvec.length vec)
+
+  let linewrap ~f ~width ~height ~line_offset (t:'a t) =
+    let rec loop (x,y) elt img =
+      let img = I.uchar (f (fst elt)) x y (snd elt) img in
+      loop (x,y) elt img
+    in
+    loop (0,0) Notty.I.empty ;
+    let x = take_hardbreaks ~offset:line_offset height in
+    ()
+
+end
 
 let render term =
   let width, height = Term.size term in

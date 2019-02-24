@@ -102,7 +102,7 @@ let test_singleton_diff () : unit =
   let b = C.singleton 1l (m 20L) 'b' in
   let ab = C.merge a b in
   let ab_diff_b = C.diff ab b in
-  let ab_diff_b_merge_a = C.merge a ab_diff_b in
+  let ab_diff_b_merge_a = C.merge_diff a ab_diff_b in
   Alcotest.(check a_snapshot) "a+b diff b = a"
     (C.Snapshot.of_t a) (C.Snapshot.of_t ab_diff_b_merge_a)
 

@@ -18,6 +18,9 @@ module CRDT(E: CRDT_element) :
     type t
     (** A CRDT state*)
 
+    type diff
+    (** The difference between two {t}'s. See {diff}.*)
+
     val pp : Format.formatter -> t -> unit
     (** [pp fmt t] is [t] pretty-printed on [fmt].*)
 
@@ -94,12 +97,13 @@ module CRDT(E: CRDT_element) :
     val merge : t -> t -> t
     (** [merge t1 t2] is the applied union of [t1] and [t2].*)
 
-    val diff : t -> t -> t
-    (** [diff t1 t2] is [t3] for which [merge t1 t3 = t2].
+    val merge_diff : t -> diff -> t
+
+    val diff : t -> t -> diff
+    (** [diff t1 t2] is [t3] for which [merge_diff t1 t3 = t2].
         Note that the inverse is not true, ie [merge t2 t3 <> t1].
-        TODO Note that a diff contains only the required updates,
+        TODO Note that a diff contains only the minimum required updates,
              and as thus ie obtaining a {Snapshot.t} is not possible.
-        TODO ^ This invariant is currently not represented in the type system.
     *)
 
     val insert_element : t -> author:author_id ->

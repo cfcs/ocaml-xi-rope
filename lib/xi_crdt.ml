@@ -10,6 +10,13 @@ module CRDT(E: CRDT_element) = struct
 
   type author_id = int32 (* a.k.a. vertice "weight" *)
 
+  module Author = struct
+    type t = int32
+    let pp : int32 Fmt.t = fun ppf t -> Fmt.pf ppf "%ld" t
+    let equal = Int32.equal
+    let compare = Int32.compare
+  end
+
   let prng = Random.State.make_self_init ()
 
   module Marker : sig
@@ -82,11 +89,10 @@ module CRDT(E: CRDT_element) = struct
   type edge =
     { left: Marker.t ;
       right: Marker.t ;
-      author: author_id ;
     }
 
   let pp_edge fmt v =
-    Fmt.pf fmt "{%a < %a [%ld]}" Marker.pp v.left Marker.pp v.right v.author
+    Fmt.pf fmt "{%a < %a}" Marker.pp v.left Marker.pp v.right
 
   module EdgeOrder = struct
     type t = edge
@@ -94,13 +100,9 @@ module CRDT(E: CRDT_element) = struct
     let compare a b = (* this is NOT topological comparison!*)
       let left_compare = Marker.compare a.left b.left in
       if 0 <> left_compare then left_compare
-      else begin
-        let author_compare = Int32.compare a.author b.author in
-        if 0 <> author_compare then author_compare
-        else begin
-          Marker.compare a.right b.right
-        end
-      end
+      else Marker.compare a.right b.right
+
+    let equal a b = Marker.equal a.left b.left && Marker.equal b.right b.right
   end
 
   module Edges : sig
@@ -113,7 +115,7 @@ module CRDT(E: CRDT_element) = struct
     val filter : (edge -> bool) -> t -> t
     val exists : (edge -> bool) -> t -> bool
     val equal : t -> t -> bool
-    val remove : edge -> t -> t
+    (*val remove : edge -> t -> t*)
     val is_empty : t -> bool
     val diff : t -> t -> t
   end
@@ -124,7 +126,6 @@ module CRDT(E: CRDT_element) = struct
       Fmt.pf fmt "@[<v>%a@]" Fmt.(parens @@ list ~sep:(unit "; ") pp_edge)
         List.(sort (fun {left=a;_} {left=b;_} -> Marker.compare a b)
                 (elements t) )
-    let equal a b = a = b
   end
 
   type edit =
@@ -164,6 +165,8 @@ module CRDT(E: CRDT_element) = struct
       authors  : author_id Markers.t ;
     }
 
+  type diff = t
+
   let equal t1 t2 =
     Markers.equal element_equal t1.elements t2.elements
     && Edges.equal t1.edges t2.edges
@@ -179,7 +182,7 @@ module CRDT(E: CRDT_element) = struct
   let empty =
     { elements = Markers.empty ;
       edges = Edges.insert { left = Marker.beginning; right = Marker.ending;
-                             author = -1l } Edges.empty;
+                           } Edges.empty;
       edits = Edits.empty ;
       authors = Markers.empty
                 |> Markers.add Marker.beginning (-1l)
@@ -189,8 +192,8 @@ module CRDT(E: CRDT_element) = struct
   let singleton author marker element=
     { empty with elements = Markers.add marker (Live element) empty.elements ;
                  edges = Edges.(
-                     insert {left=Marker.beginning; right=marker; author} empty
-                     |> insert {left=marker; right=Marker.ending; author});
+                     insert {left=Marker.beginning; right=marker; } empty
+                     |> insert {left=marker; right=Marker.ending; });
                  authors = Markers.add marker author empty.authors ;
     }
 
@@ -220,7 +223,9 @@ module CRDT(E: CRDT_element) = struct
           t1.authors t2.authors ;
     }
 
-  let diff t1 t2 =
+  let merge_diff = merge
+
+  let diff t1 t2 : diff =
     { elements = Markers.diff t1.elements t2.elements ;
       edges = Edges.diff t1.edges t2.edges ;
       edits = Edits.diff t1.edits t2.edits ;
@@ -243,31 +248,30 @@ module CRDT(E: CRDT_element) = struct
       Pvec.equal a b ~eq:(fun
                            ((a_auth, a_mark), a_elt)
                            ((b_auth, b_mark), b_elt) ->
-          Int32.equal     (a_auth) (b_auth)
-          && Marker.equal (a_mark) (b_mark)
+          Author.equal    a_auth b_auth
+          && Marker.equal a_mark b_mark
           && element_equal_ignoring_status (a_elt) (b_elt))
 
     let pp : Format.formatter -> snapshot -> unit =
       Pvec.pp ~sep:Fmt.(unit " -> ")
-        Fmt.(pair ~sep:(unit":") (pair ~sep:comma int32 Marker.pp) pp_element)
+        Fmt.(pair ~sep:(unit":")
+               (pair ~sep:comma Author.pp Marker.pp) pp_element)
 
     let to_edges (snapshot:snapshot) : Edges.t =
       Pvec.foldi_left
-        (fun acc (idx:int) ((author,marker), _) ->
+        (fun acc (idx:int) ((_author,marker), _) ->
            match idx with
            | 0 when Marker.equal marker Marker.beginning -> acc
            | 0 -> Edges.insert { left = Marker.beginning;
-                                 right = marker; author} acc
+                                 right = marker; } acc
            | _ -> Edges.insert { left = snd@@fst@@Pvec.get snapshot (pred idx) ;
-                                 right = marker; author} acc
+                                 right = marker; } acc
         ) Edges.(empty |> insert
-                   (let author, left =
-                      if Pvec.is_empty snapshot
-                      then (-1l), Marker.beginning
-                      else fst @@ Pvec.get_last snapshot
-                    in { left ;
-                         right = Marker.ending ;
-                         author }))
+                   { left = if Pvec.is_empty snapshot
+                       then Marker.beginning
+                       else snd @@ fst @@ Pvec.get_last snapshot
+                   ; right = Marker.ending ; }
+                )
         snapshot |> fun produced_edges ->
       Logs.debug (fun m -> m "to_edges: %a produced: %a"
                      pp snapshot Edges.pp produced_edges
@@ -356,7 +360,7 @@ else
         let n = MarkerSet.fold (fun this (old, old_author) ->
             let which =
               let this_author = Markers.find this authors in
-              if 1 > Int32.compare this_author old_author
+              if 1 > Author.compare this_author old_author
               then this, this_author else old, old_author
             in (*Logs.debug(fun m ->m"which:%a (%ld < %ld)"
                              Fmt.(pair Marker.pp int32) which
@@ -453,7 +457,7 @@ else
     let extend_with_vector ~(author:author_id)
         (current_snapshot:snapshot) (original_vector:E.t Pvec.t) : snapshot =
       let pp_pair = Fmt.(pair ~sep:(unit ":")
-                           (pair ~sep:comma int32 Marker.pp) pp_element) in
+                           (pair ~sep:comma Author.pp Marker.pp) pp_element) in
       let make_live element =
         let mark = (author, Marker.generate ()), Live element in
         Logs.debug (fun m ->
@@ -571,10 +575,9 @@ else
         Edges.filter
         (fun next ->
            not @@ Edges.exists
-             (fun {left;right; author = old_author;} ->
+             (fun {left;right;} ->
                 left = next.left && right = next.right
-                (* update if the old author is < than us to maintain priority*)
-                && old_author < author) old_edges) next_edges
+             ) old_edges) next_edges
       in
       (* eliminate existing edges, ignoring author,
          to avoid taking ownership: *)
@@ -599,8 +602,8 @@ else
       { empty with
         elements = Markers.singleton marker (Live element) ;
         edges = Edges.(
-            insert    {left=after ; right=marker       ; author} empty
-            |> insert {left=marker; right=before; author} )
+            insert    {left = after ; right= marker } empty
+            |> insert {left = marker; right = before } )
         ; authors = Markers.add marker author t.authors }
 
 end
