@@ -34,6 +34,9 @@ let merge_edge ~author ~after ~before marker element =
 let strip_author = Pvec.map (fun (_a,e) -> e)
 
 let insert_uchars ?(author=author) ?(first=fst !cursor) chars =
+  (* resolve cursor to position in Linevec
+     to see if cursor is at the end of a lin, according to some offset?
+  *)
   let old_vec = C.Snapshot.(of_t !document |> to_vector) in
   let vec = Pvec.splice ~first
       ~into:old_vec chars in
@@ -228,13 +231,20 @@ let pvec_line_wrap
     Pvec.empty orig_vec
   |> Pvec.drop_left offset
   |> Pvec.take_left height
+  |> Pvec.rev
   |> fun chunked_vec ->
   (*let chunked_vec = handle_lines ?f_line ~drop:offset ~take:height orig_vec in*)
   (* ^-- notty doesn't like \n *)
   chunked_vec
 
 module Linevec = struct
-  module IntSet = Set.Make(struct type t = int let compare = compare end)
+  module IntSet = struct
+    include Set.Make(struct type t = int let compare = compare end)
+    let pp ppf v =
+      Fmt.pf ppf "%d: {@[" (cardinal v) ;
+      fold (fun elt () -> Fmt.pf ppf "%d," elt) v () ;
+      Fmt.pf ppf "@]}"
+  end
   type 'a t = {
     elements: ('a * Uchar.t) Pvec.t ;
     hardbreak_vec: int Pvec.t ;
@@ -244,6 +254,27 @@ module Linevec = struct
   }
   let empty = { elements = Pvec.empty ; hardbreak_vec = Pvec.empty;
                 hardbreaks = IntSet.empty ; softbreaks = IntSet.empty }
+
+  (*let chars, t = Notty_demo.Linevec.of_uchar_vec ~softbreak_width:5
+    (Pvec.map (fun a -> 2, Uchar.of_char a)
+    @@ Pvec.of_string "1\n2\n33\n444\n5\n6\n7\n8\n9\na\nxyzabc\ndef")
+    in chars, Fmt.pf Fmt.stdout "%a" Notty_demo.Linevec.pp t,
+    (Notty_demo.Linevec.fold_breaks ~max:1000 t
+    ~f:(fun ac b -> Pvec.map (fun (_,ch) ->Uchar.to_char ch) ac
+    |> Pvec.to_list |> fun xyz -> xyz::b) []) *)
+
+  let pp ppf t =
+    let uchar_pp ppf v = Fmt.pf ppf "%C" (Uchar.to_char v) in
+    let sep = Fmt.unit ", " in
+    Fmt.pf ppf "@[<v>{@[<v>elements: %a@,\
+                hardbreak_vec: %a@,\
+                hardbreaks: %a@,\
+                softbreaks: %a@,@]}@]\n%!"
+      (Pvec.pp ~sep Fmt.(pair ~sep:(unit":") int uchar_pp)) t.elements
+      (Pvec.pp ~sep Fmt.int) t.hardbreak_vec
+      IntSet.pp t.hardbreaks
+      IntSet.pp t.softbreaks
+
   let of_uchar_vec ?(softbreak_width=80) uchvec =
     Pvec.foldi_left
       (fun (softbreak_counter,t) idx ((_, uch) as elt) ->
@@ -253,14 +284,16 @@ module Linevec = struct
          let hardbreak_vec, hardbreaks, (softbreaks, last_softbreak) =
            if uch <> Uchar.of_char '\n' then
              t.hardbreak_vec, t.hardbreaks,
-             begin if idx < softbreak_width then
+             begin if softbreak_counter < softbreak_width then
                  t.softbreaks, succ softbreak_counter
                else
-                 IntSet.add idx t.softbreaks, 0
+                 IntSet.add (pred idx) t.softbreaks, 1 (* <- softbreak_counter*)
              end
            else
              Pvec.add_last t.hardbreak_vec idx , IntSet.add idx t.hardbreaks,
-             (t.softbreaks, 0)
+             (t.softbreaks,
+              0 (* <- softbreak_counter *)
+             )
          in
          last_softbreak, { elements = Pvec.add_last t.elements elt ;
                            hardbreak_vec ; hardbreaks ; softbreaks }
@@ -290,8 +323,8 @@ module Linevec = struct
                                  }
         ) (0, empty) orig_t.elements |> snd
 
-  let drop_horizontal_left =
-    drop_horizontal_predicate ~f:(<)
+  let drop_horizontal_left i t =
+    drop_horizontal_predicate ~f:(<) i t
 
   let drop_horizontal_after offset t =
     if offset = 0 then
@@ -344,13 +377,57 @@ module Linevec = struct
         | n -> loop (IntSet.add (initial+n) acc) (n-width)
       in loop IntSet.empty (Pvec.length vec)
 
-  let linewrap ~f ~width ~height ~line_offset (t:'a t) =
-    let rec loop (x,y) elt img =
-      let img = I.uchar (f (fst elt)) x y (snd elt) img in
+  let fold_breaks ?(offset=0) ~max (t:_ t) ~f acc =
+    let breaks = IntSet.union t.softbreaks t.hardbreaks in
+    IntSet.fold (fun elt (idx,last_break,acc) ->
+        let acc =
+          if idx < offset || max < idx then
+            acc
+          else begin
+            let last = if IntSet.mem elt t.hardbreaks then elt-1 else elt
+            and first = if IntSet.mem last_break t.hardbreaks then
+                last_break +1 else last_break+1 in
+            let line =
+              if last < first
+              then Pvec.empty
+              else Pvec.range ~first ~last t.elements
+            in f line acc
+          end
+        in
+        (idx + 1, elt, acc)
+        ) breaks (0, -1, acc)
+    |> function
+    | 0, -1, acc -> f t.elements acc
+    | idx, n, acc when n < max ->
+      let leftover = Pvec.range
+          ~first:(n+1)
+          ~last:(Pvec.length t.elements-1) t.elements in
+      f leftover acc
+    | (_idx,_last_break,acc) ->
+      acc
+
+  let splice_vec ~x ~y t =
+    (* find relevant hardbreak *)
+    let hardbreak =
+      if Pvec.is_empty t.hardbreak_vec then
+        0
+      else
+      if Pvec.length t.hardbreak_vec <= y then
+        Pvec.get_last t.hardbreak_vec
+      else
+        Pvec.get t.hardbreak_vec y
+    in
+    let softbreak = () in ()
+
+  let linewrap ~f ~width ~height ~line_offset (t:_ t) =
+    (*let rec loop (x,y) elt img =
+      let img = I.uchar (f (fst elt)) (snd elt) x y img in
       loop (x,y) elt img
     in
     loop (0,0) Notty.I.empty ;
     let x = take_hardbreaks ~offset:line_offset height in
+    *)
+    let _win = take_hardbreaks ~offset:line_offset height in
     ()
 
 end
@@ -358,22 +435,16 @@ end
 let render term =
   let width, height = Term.size term in
   let vec = C.Snapshot.(of_t !document |> to_vector) in
-  let wrapped =
-    let buf = Buffer.create (Pvec.length vec) in
-    Pvec.fold_left (fun () (_, uchar) ->
-        (* ^-- TODO here we throw away author info*)
-        (* TODO ideally our line wrapping function would work on unicode
+  (* TODO ideally our line wrapping function would work on unicode
            graphemes, or at the very least on unicode codepoints.*)
-        Uutf.Buffer.add_utf_8 buf uchar) () vec ;
-    Buffer.contents buf |> Pvec.singleton |>
-    pvec_line_wrap ~width ~height |>
-    Pvec.fold_left (fun img str ->
-        Uutf.String.fold_utf_8 (fun acc _idx -> function
-            | `Malformed _ -> failwith "malformed"
-            | `Uchar c -> Pvec.add_last acc c) Pvec.empty str
-        |> Pvec.to_array |> fun x -> I.uchars A.(fg red) x
-                                     |> fun i -> I.(img <-> i)
-      ) Notty.I.empty
+  let wrapped =
+    let _, linevec = Linevec.of_uchar_vec ~softbreak_width:20 vec in
+    Linevec.fold_breaks ~offset:0 ~max:10 linevec
+      ~f:(fun line acc ->
+          Notty.(I.(
+            uchars A.(fg red) (Pvec.map (fun (a,b) -> b) line |> Pvec.to_array)
+            <-> acc))
+        ) Notty.I.empty
   in
   let img = I.(wrapped
                <-> strf "cursor: %a" Fmt.(pair ~sep:(unit",") int int) !cursor
@@ -385,7 +456,7 @@ let render term =
         I.(acc <-> strf "%s" msg)
       ) (I.strf "Debug:")
   in
-  Term.image term I.(img <-> dbg_img)
+  Term.image term I.(img <-> strf "---" <-> dbg_img)
 (*  ;
     let vec2 =
     let buf = Buffer.create (Pvec.length vec) in
@@ -507,5 +578,6 @@ let main () =
     handle_remote_input read_mvar ;
     interface () ;
   ]
-
+(*
 let () = Lwt_main.run (main ())
+*)

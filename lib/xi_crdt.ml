@@ -1,7 +1,7 @@
 module type CRDT_element = sig
   type t
   val equal : t -> t -> bool
-  val pp : Format.formatter -> t -> unit
+  val pp : Format.formatter -> t -> unit [@@ocaml.toplevel_printer]
 end
 
 module CRDT(E: CRDT_element) = struct
@@ -102,7 +102,8 @@ module CRDT(E: CRDT_element) = struct
       if 0 <> left_compare then left_compare
       else Marker.compare a.right b.right
 
-    let equal a b = Marker.equal a.left b.left && Marker.equal b.right b.right
+    let equal a b = Marker.equal    a.left  b.left
+                    && Marker.equal b.right b.right
   end
 
   module Edges : sig
@@ -356,7 +357,8 @@ else
       and while_s_nonempty edges _S _L incoming_of_node outgoing_of_node =
 
         (* instead of "choosing" an arbitrary {m} we pick the one with lowest
-           author_id in order to guarantee consistent/convergent ordering: *)
+           {author_id} in order to guarantee consistent/convergent ordering,
+           in Xi this is called "tie-breaking": *)
         let n = MarkerSet.fold (fun this (old, old_author) ->
             let which =
               let this_author = Markers.find this authors in
@@ -382,7 +384,10 @@ else
         let edges, _S, incoming_of_node, outgoing_of_node =
           (* for each node m with an edge e from n to m: *)
           match Markers.find_opt n outgoing_of_node with
-          | None -> edges, _S, incoming_of_node, outgoing_of_node
+          | None ->
+            Logs.debug (fun m -> m "no node {m} with an edge {e} from \
+                                    {n} to {m}; n = %a" Marker.pp n) ;
+            edges, _S, incoming_of_node, outgoing_of_node
           | Some m_set ->
             Logs.debug (fun m -> m "kahn:%a has outgoing: %a"
                            Marker.pp n
@@ -398,11 +403,12 @@ else
           while_s_nonempty edges _S _L incoming_of_node outgoing_of_node
         else
           edges, _S, _L, incoming_of_node, outgoing_of_node
-      in
+      in (* end of while_s_nonempty *)
       (* First, find a list of "start nodes" which have no incoming edges
          and insert them into a set S; at least one such node must exist
          in a non-empty acyclic graph: *)
       (* TODO ensure edges contains Marker.beginning *)
+      Logs.debug (fun m -> m "edges: %a" Edges.pp orig_edges);
       let _S = MarkerSet.singleton Marker.beginning in
       if not (MarkerSet.is_empty _S) then
         let edges, _S, _L, _, _  =
@@ -410,14 +416,26 @@ else
           let _L = Pvec.empty in
           while_s_nonempty orig_edges _S _L incoming_of_node outgoing_of_node in
         begin
-          if not (Edges.is_empty edges) then
-            Error (`Msg "not acyclic")
-          else
-            (* if graph has edges then
-                 output error message (graph has at least one cycle)
+            (* if graph has no edges then
+                 output message (proposed topologically sorted order: L)
                else
-                 output message (proposed topologically sorted order: L) *)
+                 output error message (graph has at least one cycle) *)
+          if Edges.is_empty edges
+          || (Edges.equal edges (* TODO this is hacky,
+                                   why do we fail to remove this edge?
+                                   Anyway, should probably just count
+                                   instead of actually maintaing a set,
+                                   so leaving here for now.*)
+             @@ Edges.insert
+               {left=Marker.beginning; right=Marker.ending} Edges.empty)
+          then
             Ok _L
+          else
+            Rresult.R.error_msgf
+              "not acyclic:@[<v>@,edges: %a@,markers: %a@,L: %a@]"
+              Edges.pp edges
+              Fmt.(list Marker.pp) (MarkerSet.elements _S)
+              (Pvec.pp ~sep:(Fmt.unit " -> ") Marker.pp) _L
         end
       else Error (`Msg "edges is not empty at start")
 
@@ -433,17 +451,9 @@ else
           vec
       in
       let markers = kahns_stuff () in
-      (*
-      let longest_dag =
-        (* Ensure we have nothing before BEGINNING: *)
-        let () = assert(List.assoc Marker.beginning counted = 0) in
-        (* Ensure we have at least one thing pointing to ENDING: *)
-        let () = assert(List.assoc Marker.ending counted > 0) in
-
-        Logs.debug (fun m ->
-            m "counted vertices: @[<v>%a@]"
-              Fmt.(list ~sep:(unit "@,")@@ pair ~sep pp_marker int) counted) ;
-      *)
+      let () = (* validate invariants *)
+        assert(Marker.equal Marker.beginning @@ Pvec.get_first markers) ;
+        assert(Marker.equal Marker.ending @@ Pvec.get_last markers) in
       let produced : snapshot =
         Pvec.fold_left (fun vec marker ->
             if not Marker.(equal marker beginning || equal marker ending) then

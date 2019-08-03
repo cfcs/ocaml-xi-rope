@@ -8,7 +8,7 @@ module type CRDT_element = sig
   val equal : t -> t -> bool
   (** [equal a b] is [true] if [a] and [b] are structurally equivalent.*)
 
-  val pp : Format.formatter -> t -> unit
+  val pp : Format.formatter -> t -> unit [@@ocaml.toplevel_printer]
   (** [pp fmt t] is [t] pretty-printed on [fmt].*)
 end
 
@@ -21,7 +21,7 @@ module CRDT(E: CRDT_element) :
     type diff
     (** The difference between two {t}'s. See {diff}.*)
 
-    val pp : Format.formatter -> t -> unit
+    val pp : Format.formatter -> t -> unit [@@ocaml.toplevel_printer]
     (** [pp fmt t] is [t] pretty-printed on [fmt].*)
 
     val equal : t -> t -> bool
@@ -34,12 +34,15 @@ module CRDT(E: CRDT_element) :
     type elt = E.t
     (** The type of the underlying elements, ie the user's data.*)
 
-    val pp_elt : Format.formatter -> E.t -> unit
+    val pp_elt : Format.formatter -> E.t -> unit [@@ocaml.toplevel_printer]
     (** [pp_elt] is {!E.pp}.*)
 
     type element = private | Live of elt
                            | Tombstone of elt
+
     val pp_element : Format.formatter -> element -> unit
+    [@@ocaml.toplevel_printer]
+
     val element_equal : element -> element -> bool
     (** [element_equal a b] is [{!E.equal} a b] if
         [a] and [b] are both {!element.Live} or {!element.Tombstone};
@@ -65,7 +68,8 @@ module CRDT(E: CRDT_element) :
           representation lying between [beginning] and [ending], exclusively.
           See {!ending}.*)
 
-      val pp : Format.formatter -> t -> unit
+      val pp : Format.formatter -> t -> unit [@@ocaml.toplevel_printer]
+
       val equal : t -> t -> bool
       (** We expose equality, but since lt/gt comparisons are expensive
           due to the topological ordering, we hide those.*)
@@ -126,6 +130,7 @@ module CRDT(E: CRDT_element) :
           consisting of the subset of {!element.Live} {!elt}'s in [snapshot].*)
 
       val pp : Format.formatter -> snapshot -> unit
+      [@@ocaml.toplevel_printer]
 
       val equal : snapshot -> snapshot -> bool
       (** [equal a b] is [true] if [a] and [b] are equivalent,

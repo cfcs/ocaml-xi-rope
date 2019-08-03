@@ -7,3 +7,14 @@
 #mod_use "lib/xi_rope_top.ml";;
 
 open Xi_crdt;;
+
+(* demo: *)
+
+#require "lwt.unix";;
+#require "notty.unix";;
+#require "notty.lwt";;
+#require "notty.top";;
+#mod_use "demo/notty_demo.ml";;
+open Notty_demo;;
+#install_printer Notty_demo.Linevec.pp;;
+
