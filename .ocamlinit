@@ -1,8 +1,9 @@
+#use "topfind";;
 #require "logs.top";;
 #require "fmt.top";;
 #require "pvec";;
 #require "rresult.top";;
-#require "compiler-libs.toplevel";;
+(*#require "compiler-libs.toplevel";;*)
 #mod_use "lib/xi_crdt.ml";;
 #mod_use "lib/xi_rope_top.ml";;
 

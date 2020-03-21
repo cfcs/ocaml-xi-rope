@@ -57,8 +57,15 @@ opam install alcotest fmt logs pvec qcheck rresult uchar
 ```
 
 Test / demo utils:
-```
+```shell
 opam install notty
+dune build
+./_build/default/demo/notty_demo.exe
+# this will launch a server on 127.0.0.1:7777
+# start the program again in another window to have it connect to
+# the server. you can now enjoy collaborative editing with
+# horribly broken linewrapping where edits from anyone but the server
+# gets propagated to the server exclusively. PRs welcome! :-)
 ```
 
 # Further reading

@@ -1,0 +1,6 @@
+(test
+(name tests)
+(package xi-rope)
+(libraries alcotest fmt logs.fmt pvec qcheck qcheck-core xi-rope)
+(modules test_xi_crdt tests)
+)

@@ -1,0 +1,7 @@
+(library
+	(name xi_rope)
+	(public_name xi-rope)
+	(modules xi_crdt)
+	(libraries fmt logs pvec result rresult)
+	(wrapped false)
+	)

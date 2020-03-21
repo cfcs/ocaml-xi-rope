@@ -12,7 +12,7 @@ module CRDT(E: CRDT_element) = struct
 
   module Author = struct
     type t = int32
-    let pp : int32 Fmt.t = fun ppf t -> Fmt.pf ppf "%ld" t
+    let pp : t Fmt.t = fun ppf t -> Fmt.pf ppf "%ld" t
     let equal = Int32.equal
     let compare = Int32.compare
   end
@@ -76,7 +76,7 @@ module CRDT(E: CRDT_element) = struct
           (* exists solely in t2: *)
           | None -> begin fun b -> b end
           | Some a -> begin function
-              | None -> None
+              | None -> None (*solely in t1? not good TODO *)
               | Some b -> if a = b then None else Some b
             end
         ) t1 t2
@@ -102,8 +102,10 @@ module CRDT(E: CRDT_element) = struct
       if 0 <> left_compare then left_compare
       else Marker.compare a.right b.right
 
+    (*
     let equal a b = Marker.equal    a.left  b.left
                     && Marker.equal b.right b.right
+*)
   end
 
   module Edges : sig
@@ -119,6 +121,8 @@ module CRDT(E: CRDT_element) = struct
     (*val remove : edge -> t -> t*)
     val is_empty : t -> bool
     val diff : t -> t -> t
+    val to_seq : t -> edge Seq.t
+    val of_seq : edge Seq.t -> t
   end
   = struct
     include Set.Make(EdgeOrder)
@@ -127,6 +131,8 @@ module CRDT(E: CRDT_element) = struct
       Fmt.pf fmt "@[<v>%a@]" Fmt.(parens @@ list ~sep:(unit "; ") pp_edge)
         List.(sort (fun {left=a;_} {left=b;_} -> Marker.compare a b)
                 (elements t) )
+    let empty = insert { left = Marker.beginning; right = Marker.ending;
+                             } empty
   end
 
   type edit =
@@ -141,6 +147,7 @@ module CRDT(E: CRDT_element) = struct
     Fmt.pf fmt "@[<v>{ @[<v>undo: (TODO);@ deleted: %a@ inserted: %a@]}@]"
       Markers.pp deleted Markers.pp inserted
 
+  (*
   let empty_edit =
     { undo_group_id = () ;
       deleted = Markers.empty ;
@@ -148,6 +155,7 @@ module CRDT(E: CRDT_element) = struct
       edges = Edges.empty ;
       author = 0l; (* TODO *)
     }
+*)
 
   module Edits = struct include Set.Make(struct
         type t = edit
@@ -182,8 +190,7 @@ module CRDT(E: CRDT_element) = struct
 
   let empty =
     { elements = Markers.empty ;
-      edges = Edges.insert { left = Marker.beginning; right = Marker.ending;
-                           } Edges.empty;
+      edges = Edges.empty;
       edits = Edits.empty ;
       authors = Markers.empty
                 |> Markers.add Marker.beginning (-1l)
@@ -228,7 +235,8 @@ module CRDT(E: CRDT_element) = struct
 
   let diff t1 t2 : diff =
     { elements = Markers.diff t1.elements t2.elements ;
-      edges = Edges.diff t1.edges t2.edges ;
+      edges = Edges.diff t2.edges t1.edges; (*edges of t1 not in t2*)
+      (* TODO the 'diff' semantics of our stuff differs from that of Set.S, not good.*)
       edits = Edits.diff t1.edits t2.edits ;
       authors = Markers.diff t1.authors t2.authors;
     }
@@ -444,6 +452,7 @@ else
         match kahns original_edges authors with
         | Error `Msg x ->
           Logs.err (fun m -> m "kahns failed: %s" x) ;
+          ignore @@ failwith "kahns failed TODO" ;
           Pvec.empty
         | Ok vec ->
           Logs.debug (fun m -> m "kahn's succeeded!");
@@ -452,7 +461,17 @@ else
       in
       let markers = kahns_stuff () in
       let () = (* validate invariants *)
+        let first, last = Pvec.get_first markers, Pvec.get_last markers in
+        if not @@ Marker.(equal beginning) first then
+          failwith "fff1" ;
+        if not (Marker.(equal ending) last
+                || (Marker.(equal beginning) last && Pvec.length markers = 1)) then
+          failwith (Printf.sprintf "bbb\n%Ld\n%Ld"
+                      (Marker.to_int64 (Pvec.get_first markers))
+                      (Marker.to_int64 (Pvec.get_last markers))) ;
         assert(Marker.equal Marker.beginning @@ Pvec.get_first markers) ;
+        (* TODO this assertion ensures there was a valid path through the graph,
+           it should not be disabled. sometimes we hit it ...:*)
         assert(Marker.equal Marker.ending @@ Pvec.get_last markers) in
       let produced : snapshot =
         Pvec.fold_left (fun vec marker ->
@@ -612,9 +631,9 @@ else
       { empty with
         elements = Markers.singleton marker (Live element) ;
         edges = Edges.(
-            insert    {left = after ; right= marker } empty
+            insert    {left = after ; right = marker } empty
             |> insert {left = marker; right = before } )
-        ; authors = Markers.add marker author t.authors }
+        ; authors = Markers.singleton marker author  }
 
 end
 

@@ -13,44 +13,7 @@ module type CRDT_element = sig
 end
 
 module CRDT(E: CRDT_element) :
-  sig
-
-    type t
-    (** A CRDT state*)
-
-    type diff
-    (** The difference between two {t}'s. See {diff}.*)
-
-    val pp : Format.formatter -> t -> unit [@@ocaml.toplevel_printer]
-    (** [pp fmt t] is [t] pretty-printed on [fmt].*)
-
-    val equal : t -> t -> bool
-    (** [equal a b] is [true] if [a] and [b] containg exactly the same elements,
-        edges and edits.*)
-
-    type author_id = int32
-    (** The type used to represent an author. Used for "tie" resolution.*)
-
-    type elt = E.t
-    (** The type of the underlying elements, ie the user's data.*)
-
-    val pp_elt : Format.formatter -> E.t -> unit [@@ocaml.toplevel_printer]
-    (** [pp_elt] is {!E.pp}.*)
-
-    type element = private | Live of elt
-                           | Tombstone of elt
-
-    val pp_element : Format.formatter -> element -> unit
-    [@@ocaml.toplevel_printer]
-
-    val element_equal : element -> element -> bool
-    (** [element_equal a b] is [{!E.equal} a b] if
-        [a] and [b] are both {!element.Live} or {!element.Tombstone};
-        otherwise [false].*)
-
-    val element_equal_ignoring_status : element -> element -> bool
-    (** [element_equal_ignoring_status a b] is [{!E.equal} a b], regardless of
-        the liveness of the two. See {!element_equal}.*)
+sig
 
     module rec Marker : sig
       type t (** A marker uniquely represents an element in the set *)
@@ -74,6 +37,9 @@ module CRDT(E: CRDT_element) :
       (** We expose equality, but since lt/gt comparisons are expensive
           due to the topological ordering, we hide those.*)
 
+      val compare : t -> t -> int
+      (* TODO didn't hide it *)
+
       val of_int64 : int64 -> t
       (** [of_int64 num] is a marker represented by [num].
           [num] should be random, and is not validated against
@@ -89,6 +55,81 @@ module CRDT(E: CRDT_element) :
       *)
 
     end
+
+  type elt = E.t
+  (** The type of the underlying elements, ie the user's data.*)
+
+
+  type element =
+    | Live of elt
+    | Tombstone of elt
+
+  type edge =
+    { left: Marker.t ;
+      right: Marker.t ;
+    }
+
+  module Edges : sig
+    type t
+    val to_seq : t -> edge Seq.t
+    val of_seq : edge Seq.t -> t
+  end
+
+  module Markers : sig
+    include module type of Map.Make(Marker)
+    val diff : 'a t -> 'a t -> 'a t
+    val pp : Format.formatter -> element t -> unit
+  end
+
+  type author_id = int32
+  (** The type used to represent an author. Used for "tie" resolution.*)
+
+  type edit =
+    { undo_group_id : unit ; (* TODO *)
+      deleted : element Markers.t ;
+      inserted : element Markers.t ;
+      edges : Edges.t;
+      author : author_id;
+    }
+
+  module Edits: sig
+    type t
+    val to_seq : t -> edit Seq.t
+    val of_seq : edit Seq.t -> t
+  end
+
+  type t =
+    { elements : element Markers.t ;
+      edges    : Edges.t ;
+      edits    : Edits.t ;
+      authors  : author_id Markers.t ;
+    }
+    (** A CRDT state*)
+
+  type diff = t
+  (** The difference between two {t}'s. See {diff}.*)
+
+    val pp : Format.formatter -> t -> unit [@@ocaml.toplevel_printer]
+    (** [pp fmt t] is [t] pretty-printed on [fmt].*)
+
+    val equal : t -> t -> bool
+    (** [equal a b] is [true] if [a] and [b] containg exactly the same elements,
+        edges and edits.*)
+
+    val pp_elt : Format.formatter -> E.t -> unit [@@ocaml.toplevel_printer]
+    (** [pp_elt] is {!E.pp}.*)
+
+    val pp_element : Format.formatter -> element -> unit
+    [@@ocaml.toplevel_printer]
+
+    val element_equal : element -> element -> bool
+    (** [element_equal a b] is [{!E.equal} a b] if
+        [a] and [b] are both {!element.Live} or {!element.Tombstone};
+        otherwise [false].*)
+
+    val element_equal_ignoring_status : element -> element -> bool
+    (** [element_equal_ignoring_status a b] is [{!E.equal} a b], regardless of
+        the liveness of the two. See {!element_equal}.*)
 
     val empty : t
     (** [empty] is a [t] without any elements, edges or edits. *)

@@ -25,7 +25,7 @@ type edit =
     after: C.Marker.t ;
     marker: C.Marker.t ;
   }
-let write_mvar : edit Lwt_mvar.t = Lwt_mvar.create_empty ()
+let write_mvar : C.diff Lwt_mvar.t = Lwt_mvar.create_empty ()
 
 let merge_edge ~author ~after ~before marker element =
   document := C.insert_element !document ~author ~after ~before marker element ;
@@ -37,20 +37,35 @@ let insert_uchars ?(author=author) ?(first=fst !cursor) chars =
   (* resolve cursor to position in Linevec
      to see if cursor is at the end of a lin, according to some offset?
   *)
-  let old_vec = C.Snapshot.(of_t !document |> to_vector) in
-  let vec = Pvec.splice ~first
-      ~into:old_vec chars in
-  let old_document = !document in
-  document := C.update_with_vector author !document (strip_author vec) ;
-  let diff = C.diff old_document !document in
-  let _ =
-    (*let edit = {
-      author ;
-      element ;
-      alive ;
-      before; after; marker;
-      } in ()*) ()
+  let _ = author (*TODO allow overriding author*) in
+  let old_live = C.Snapshot.(of_t !document |> live_elements) in
+  let first_e =
+    if Pvec.length old_live <= first
+    then (try fst @@ Pvec.get_last old_live with _ -> C.Marker.beginning)
+    else (try fst@@Pvec.get old_live (pred first) with _ -> C.Marker.beginning)
   in
+  let last_e =
+    if Pvec.length old_live <= first then C.Marker.ending else
+      fst @@ Pvec.get old_live first in
+  assert (first_e <> C.Marker.ending);
+  assert (last_e <> C.Marker.beginning);
+  let newdoc, _, _ = Pvec.fold_left (fun (doc,after,before) (author,uchar) ->
+      let this = C.Marker.generate () in
+      debug := Pvec.add_last !debug
+          (Fmt.strf "this:%a after:%a before:%a"
+             C.Marker.pp this
+             C.Marker.pp after
+             C.Marker.pp before) ;
+      let doc =
+        C.insert_element doc ~author ~after ~before this uchar in
+      doc, this, before
+      (* room for optimization: generate id of next and use that as "before" *)
+    ) (!document, first_e, last_e) chars in
+  let old_document = !document in
+  let diff = C.diff !document newdoc in
+  document := newdoc ;
+  let vec = C.Snapshot.(of_t !document |> to_vector) in
+  let () = Lwt.async (fun () -> Lwt_mvar.put write_mvar diff) in
   debug := Pvec.add_first (Fmt.strf "update_with_vector:\
                                      @[<v> %a@,old: %a@,new: %a@]"
                              Pvec.(pp ~sep:Fmt.(unit" -> ")
@@ -67,6 +82,8 @@ let delete_range first last =
   let vec = Pvec.rem_range ~first ~last old_vec in
   let old_document = !document in
   document := C.update_with_vector author !document (strip_author vec) ;
+  let diff = C.diff old_document !document in
+  let () = Lwt.async (fun () -> Lwt_mvar.put write_mvar diff) in
   debug := Pvec.add_first (Fmt.strf "delete range \\[%d;%d\\]:\
                                      @[<v> %a@,old: %a@,new: %a@]"
                              first last
@@ -118,36 +135,84 @@ let rec increase_counter () =
   ) >>= increase_counter
 
 let initialize_socket ~write_mvar ~read_mvar : unit Lwt.t =
-  begin Lwt.try_bind (fun () -> Lwt_unix.mkfifo "./demo.fifo" 0o600)
-      (fun a -> Lwt.return a)
-      (function Unix.(Unix_error (EEXIST, _, _)) -> Lwt.return_unit
-              | _ -> failwith "unexpected error")
-  end >>= fun () ->
-  Lwt_unix.openfile "./demo.fifo" Lwt_unix.[O_RDWR] 0o000 >>= fun fd ->
-  let recvbuf = Bytes.create (32+5) in (* see {handle_remote_input} *)
-  let rec reader fd =
-    Lwt_io.read_into_exactly fd recvbuf 0 (Bytes.length recvbuf) >>= fun () ->
-    Lwt_mvar.put read_mvar (Bytes.to_string recvbuf) >>= fun () ->
-    reader fd
-  in
   let rec writer fd =
-    Lwt_mvar.take write_mvar >>= fun (x:edit) ->
-    let sendbuf = Printf.sprintf "%ld,%ld,%Ld,%Ld,%Ld."
-        x.author (Uchar.to_int x.element |> Int32.of_int)
-        (C.Marker.to_int64 x.marker)
-        (C.Marker.to_int64 x.before)
-        (C.Marker.to_int64 x.after)
-                  |> Bytes.of_string
+    Lwt_mvar.take write_mvar >>= fun (x:C.diff) ->
+    let open Sexplib.Conv in
+    let sexp_of_marker m = C.Marker.to_int64 m |> sexp_of_int64 in
+    let sexp_of_markerset sexp_of_elt m =
+      C.Markers.to_seq m |> List.of_seq
+      |> sexp_of_list (sexp_of_pair sexp_of_marker sexp_of_elt)
+    in
+    let sexp_of_element = let open Sexplib.Sexp in function
+      | C.Live e -> List [Atom "+"; sexp_of_int (Uchar.to_int e)]
+      | C.Tombstone e -> List [Atom "-";sexp_of_int (Uchar.to_int e)]
+    in
+    let sexp_of_edges e =
+      C.Edges.to_seq e |> List.of_seq
+      |> sexp_of_list (fun (edge:C.edge) ->
+          sexp_of_list sexp_of_marker [edge.left ; edge.right])
+    in
+    let elements = sexp_of_markerset sexp_of_element x.C.elements in
+    let edges = sexp_of_edges x.C.edges in
+    let edits =
+      let e = x.C.edits in
+      C.Edits.to_seq e |> List.of_seq
+      |> sexp_of_list (fun (x:C.edit) ->
+          sexp_of_list (fun a -> a) [
+            sexp_of_markerset sexp_of_element x.deleted ;
+            sexp_of_markerset sexp_of_element x.inserted ;
+            sexp_of_edges x.edges ;
+            sexp_of_int32 x.author
+          ]
+        )
+    in
+    let authors = sexp_of_markerset sexp_of_int32 x.C.authors in
+    let sendbuf =
+      let open Sexplib.Sexp in
+      (to_string @@
+      List [
+        Atom "diff" ;
+        List [Atom "elements"; elements];
+        List [Atom "edges"; edges];
+        List [Atom "edits"; edits];
+        List [Atom "authors"; authors]
+      ]) ^ "\n" |> Bytes.of_string
     in
     Lwt_io.write_from_exactly fd sendbuf 0 (Bytes.length sendbuf) >>= fun () ->
     writer fd
   in
-  Lwt.choose [
-    reader Lwt_io.(of_unix_fd ~mode:Input @@ Lwt_unix.unix_file_descr fd) ;
-    writer Lwt_io.(of_unix_fd ~mode:Output @@ Lwt_unix.unix_file_descr fd)
-  ]
-
-(* Lwt_io.read_value *)
+  let rec reader fd =
+    Lwt_io.read_line fd >>= fun line ->
+    Lwt_mvar.put read_mvar line >>= fun () ->
+    reader fd
+  in
+  let sockaddr = Lwt_unix.ADDR_INET (
+      Unix.inet_addr_of_string "127.0.0.1",7777) in
+  let socket = Lwt_unix.socket PF_INET SOCK_STREAM 0 in
+  let be_server () : unit Lwt.t =
+    (* when the server receives, it should forward I guess.
+       Or example should use multicast? *)
+    Lwt_unix.setsockopt socket Unix.SO_REUSEADDR true ;
+    Lwt_unix.bind socket sockaddr >>= fun () ->
+    Lwt_unix.listen socket 1 ;
+    let rec serve () =
+      Lwt_unix.accept socket >>= fun (fd, _addr) ->
+      Lwt.async (fun () ->
+          Lwt.choose [
+        reader Lwt_io.(of_unix_fd ~mode:Input @@ Lwt_unix.unix_file_descr fd) ;
+        writer Lwt_io.(of_unix_fd ~mode:Output @@ Lwt_unix.unix_file_descr fd)
+      ]) ; serve ()
+    in serve ()
+  in
+  Lwt.try_bind be_server (fun () -> Lwt.return_unit)
+    (fun _ ->
+       Lwt_unix.connect socket sockaddr >>= fun () ->
+       let fd = Lwt_unix.unix_file_descr socket in
+       Lwt.choose [
+         reader Lwt_io.(of_unix_fd ~mode:Input fd) ;
+         writer Lwt_io.(of_unix_fd ~mode:Output fd)
+       ]
+    )
 
 let pvec_line_wrap
     ?(offset=0) ~height ~width (orig_vec:string Pvec.t) =
@@ -398,7 +463,7 @@ module Linevec = struct
         ) breaks (0, -1, acc)
     |> function
     | 0, -1, acc -> f t.elements acc
-    | idx, n, acc when n < max ->
+    | _idx, n, acc when n < max ->
       let leftover = Pvec.range
           ~first:(n+1)
           ~last:(Pvec.length t.elements-1) t.elements in
@@ -406,6 +471,7 @@ module Linevec = struct
     | (_idx,_last_break,acc) ->
       acc
 
+  (*
   let splice_vec ~x ~y t =
     (* find relevant hardbreak *)
     let hardbreak =
@@ -417,9 +483,11 @@ module Linevec = struct
       else
         Pvec.get t.hardbreak_vec y
     in
-    let softbreak = () in ()
+    let _softbreak = () in ()
+*)
 
-  let linewrap ~f ~width ~height ~line_offset (t:_ t) =
+  let linewrap ~f ~width ~height ~line_offset (_t:_ t) =
+    let _TODO = f, width in
     (*let rec loop (x,y) elt img =
       let img = I.uchar (f (fst elt)) (snd elt) x y img in
       loop (x,y) elt img
@@ -438,12 +506,21 @@ let render term =
   (* TODO ideally our line wrapping function would work on unicode
            graphemes, or at the very least on unicode codepoints.*)
   let wrapped =
+    let by_author vec =
+      Pvec.fold_left (fun i (author, b) ->
+          let colors = [| A.red ; A.blue ; A.green|] in
+          let c = A.fg colors.((Int32.to_int author mod 3))in
+          Notty.I.(i <|> uchars c [|b|])
+        )I.empty vec
+    in
     let _, linevec = Linevec.of_uchar_vec ~softbreak_width:20 vec in
     Linevec.fold_breaks ~offset:0 ~max:10 linevec
       ~f:(fun line acc ->
-          Notty.(I.(
-            uchars A.(fg red) (Pvec.map (fun (a,b) -> b) line |> Pvec.to_array)
-            <-> acc))
+          Notty.I.(by_author line
+          (*Notty.(I.(
+              uchars A.(fg red) (Pvec.map (fun (_author_id,b) -> b) line
+                                 |> Pvec.to_array)*)
+          <-> acc)
         ) Notty.I.empty
   in
   let img = I.(wrapped
@@ -451,12 +528,13 @@ let render term =
               ) in
   let dbg_img =
     let offset = snd !cursor in
-    pvec_line_wrap ~offset:0 ~height:(height-6) ~width !debug
+    pvec_line_wrap ~offset ~height:(height-6) ~width !debug
     |> Pvec.fold_left (fun acc msg ->
         I.(acc <-> strf "%s" msg)
       ) (I.strf "Debug:")
   in
-  Term.image term I.(img <-> strf "---" <-> dbg_img)
+  Term.image term I.(img <-> strf "---" <-> dbg_img) >>= fun () ->
+  Notty_lwt.Term.cursor term (Some (!cursor))
 (*  ;
     let vec2 =
     let buf = Buffer.create (Pvec.length vec) in
@@ -531,10 +609,7 @@ let rec loop term (e, t) =
   | `Key (`Enter, _) ->
     insert_uchars @@ Pvec.singleton (author, Uchar.of_char '\n') ;
     cursor := (0, succ @@ snd !cursor) ;
-    Notty_unix.show_cursor ~cap:Notty.Cap.ansi ~fd:stdout true ;
-    Notty_unix.show_cursor ~cap:Notty.Cap.ansi ~fd:stderr true ;
-
-    render term >>= fun () ->
+    Notty_lwt.Term.cursor term (Some (!cursor)) >>= fun () ->
     loop term (event term, t)
   | `Key (_ as _key,_) ->
     assert(_key <> `Enter);
@@ -554,19 +629,59 @@ let interface () =
   Notty_unix.show_cursor ~cap:Notty.Cap.ansi ~fd:stderr true ;
   loop term (event term, timer ())
 
+let diff_of_sexp str =
+  let open Sexplib in
+  let open Rresult in
+  begin match Sexp.of_string str with
+    | List [Atom "diff" ;
+            List [Atom "elements"; elements] ;
+            List [Atom "edges"; edges] ;
+            List [Atom "edits"; edits] ;
+            List [Atom "authors"; authors]
+           ] -> Ok (elements, edges, edits, authors)
+    | _ -> Error "not a diff"
+  end >>= fun (elements, edges, edits, authors) ->
+  let marker_of_sexp m = Conv.int64_of_sexp m |> C.Marker.of_int64 in
+  let markerset_of_sexp elt_of_sexp ms =
+    Conv.list_of_sexp (Conv.pair_of_sexp marker_of_sexp elt_of_sexp) ms
+    |> List.to_seq |> C.Markers.of_seq
+  in
+  let edge_of_sexp e =
+    let left, right = Conv.pair_of_sexp marker_of_sexp marker_of_sexp e in
+    {C.left; right} in
+  let edges_of_sexp e =
+    Conv.list_of_sexp edge_of_sexp e |> List.to_seq |> C.Edges.of_seq
+  in
+  let element_of_sexp = let open Sexp in let open Conv in function
+    | List [Atom "+"; i] -> C.Live (Uchar.of_int @@ int_of_sexp i)
+    | List [Atom "-"; i] -> C.Tombstone (Uchar.of_int @@ int_of_sexp i)
+    | _ -> failwith "error"
+  in
+  let edit_of_sexp = let open Sexp in function
+      | List [deleted; inserted ; edges; author] ->
+        { C.undo_group_id = () ;
+          deleted = markerset_of_sexp element_of_sexp deleted ;
+          inserted = markerset_of_sexp element_of_sexp inserted ;
+          edges = edges_of_sexp edges ;
+          author = Conv.int32_of_sexp author ; }
+      | _ -> failwith "error2"
+  in
+  let elements = markerset_of_sexp element_of_sexp elements in
+  let edges = edges_of_sexp edges in
+  let edits = Conv.list_of_sexp edit_of_sexp edits
+              |> List.to_seq |> C.Edits.of_seq in
+  let authors = markerset_of_sexp Conv.int32_of_sexp authors in
+  Ok { C.elements ; edges; edits; authors }
+
 let handle_remote_input mvar =
   let rec loop () : unit Lwt.t =
     Lwt_mvar.take mvar >>= fun input ->
-    Scanf.sscanf input "%ld,%ld,%Ld,%Ld,%Ld." (* 4+4 +8+8+8 = 32 *)
-      (* echo -n '33,0098,00001239,000000000,268435456.' >> demo.fifo *)
-      (fun author uch marker incoming_edge outgoing_edge ->
-         let uch = Uchar.of_int (Int32.to_int uch) in
-         let before = C.Marker.of_int64 outgoing_edge
-         and after  = C.Marker.of_int64 incoming_edge
-         and marker = C.Marker.of_int64 marker in
-         merge_edge ~author ~before ~after marker uch ;
-         debug := Pvec.add_first "fuck" !debug
-      ) ;
+    begin try
+        let peer_diff : C.diff = diff_of_sexp input |> Rresult.R.get_ok in
+        document := C.merge_diff !document peer_diff ;
+      with
+      | Failure err -> debug := Pvec.add_first err !debug ;
+    end ;
     loop ()
   in loop ()
 
@@ -578,6 +693,5 @@ let main () =
     handle_remote_input read_mvar ;
     interface () ;
   ]
-(*
+
 let () = Lwt_main.run (main ())
-*)

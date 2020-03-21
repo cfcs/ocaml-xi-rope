@@ -1,0 +1,8 @@
+(executable
+(name notty_demo)
+(public_name notty-demo)
+(package xi-rope)
+(libraries fmt logs lwt lwt.unix notty notty.unix notty.lwt sexplib
+	   pvec result rresult xi-rope)
+(modules notty_demo)
+)
